@@ -9,7 +9,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Input
 from tensorflow.keras.callbacks import EarlyStopping
 import tensorflow as tf
-import io
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -60,13 +59,13 @@ with st.expander("ℹ️ About this forecasting system"):
     st.write("""
     This application uses historical monthly electricity consumption to
     forecast future consumption using two machine learning models:
-    
+
     - **LSTM:** A neural network designed to learn patterns from sequential data.
     - **XGBoost:** A machine learning model that combines decision trees.
-    
+
     The models are evaluated using past months that are set aside from training.
     Their evaluation results help users compare prediction errors.
-    
+
     Forecast results are estimates and should be interpreted together with
     the quality and completeness of the uploaded data.
     """)
@@ -308,16 +307,12 @@ for previous, current in zip(periods[:-1], periods[1:]):
         )
 
 if missing_months:
-    st.warning(
-        "Missing months were detected: "
+    st.info(
+        "Gaps in the monthly timeline were detected: "
         + "; ".join(missing_months[:5])
-        + (
-            " ..." if len(missing_months) > 5 else ""
-        )
-        + ". The models use records in sequence, so a gap may be treated "
-        "like consecutive observations. This can affect the results. "
-        "Do not interpret the evaluation as fully reliable until the "
-        "missing-month handling is explained in your methodology."
+        + (" ..." if len(missing_months) > 5 else "")
+        + ". Training sequences that cross a missing-month gap are excluded. "
+        "The models will learn only from windows whose dates are consecutive."
     )
 
 y = data["_Consumption"].astype(float).to_numpy()
@@ -350,7 +345,7 @@ with col3:
     st.metric("Latest Consumption", f"{y[-1]:,.2f} kWh")
 
 history_df = pd.DataFrame({
-    "Month": [str(d) for d in dates],
+    "Month": [d.to_timestamp() for d in dates],
     "Consumption (kWh)": y
 })
 
@@ -365,6 +360,7 @@ history_fig.update_layout(
     title="Historical Monthly Electricity Consumption",
     xaxis_title="Month",
     yaxis_title="Consumption (kWh)",
+    xaxis=dict(type="date"),
     template="plotly_white",
     hovermode="x unified"
 )
@@ -375,9 +371,9 @@ st.plotly_chart(history_fig, use_container_width=True)
 st.header("3. Forecast Settings")
 
 st.write(
-    "Choose how many future months you want to forecast. "
-    "The system will automatically use the same number of recent past "
-    "months as the evaluation period."
+    "Choose the number of future months to forecast. Model performance is "
+    "evaluated separately on up to the latest 12 consecutive historical months "
+    "so the comparison is not based on only one to three test observations."
 )
 
 horizon = st.selectbox(
@@ -387,10 +383,8 @@ horizon = st.selectbox(
 )
 
 st.info(
-    f"Your selection is **{horizon} month(s)**. The system will reserve "
-    f"the latest **{horizon} historical month(s)** for evaluation. "
-    "These are past months with known actual consumption, used to compare "
-    "predictions with actual values. They are separate from the future forecast."
+    f"Future forecast: **{horizon} month(s)**. The evaluation period is selected "
+    "separately from the latest consecutive historical segment (up to 12 months)."
 )
 
 if len(y) - horizon < 18:
@@ -405,9 +399,34 @@ if len(y) - horizon < 18:
 LOOKBACK = 12
 
 
+def is_consecutive_window(periods, start_idx, end_idx):
+    """True when periods[start_idx:end_idx+1] are consecutive calendar months."""
+    window = periods[start_idx:end_idx + 1]
+    if len(window) <= 1:
+        return True
+    return all(
+        window[j].ordinal - window[j - 1].ordinal == 1
+        for j in range(1, len(window))
+    )
+
+
+def latest_contiguous_segment_length(periods):
+    """Count consecutive monthly records at the end of the dataset."""
+    if not periods:
+        return 0
+    count = 1
+    for i in range(len(periods) - 1, 0, -1):
+        if periods[i].ordinal - periods[i - 1].ordinal != 1:
+            break
+        count += 1
+    return count
+
+
 def xgb_features(history, target_period):
     """Create lag and calendar features for one target month."""
     h = np.asarray(history, dtype=float)
+    if len(h) < LOOKBACK:
+        raise ValueError(f"At least {LOOKBACK} consecutive months are needed.")
 
     features = [h[-lag] for lag in range(1, LOOKBACK + 1)]
     features += [
@@ -421,60 +440,62 @@ def xgb_features(history, target_period):
         np.sin(2 * np.pi * month / 12),
         np.cos(2 * np.pi * month / 12)
     ]
-
     return features
 
 
 def make_xgb_training_data(values, periods):
-    features = []
-    targets = []
-
+    """Create examples only when all 12 lag months and the target are consecutive."""
+    features, targets = [], []
     for i in range(LOOKBACK, len(values)):
-        features.append(
-            xgb_features(values[:i], periods[i])
-        )
+        if not is_consecutive_window(periods, i - LOOKBACK, i):
+            continue
+        features.append(xgb_features(values[i - LOOKBACK:i], periods[i]))
         targets.append(values[i])
-
-    return np.asarray(features), np.asarray(targets)
+    return np.asarray(features, dtype=float), np.asarray(targets, dtype=float)
 
 
 def recursive_xgb_forecast(model, history, start_period, steps):
     history = list(np.asarray(history, dtype=float))
     predictions = []
-
     for step in range(steps):
         target_period = start_period + step
         features = xgb_features(history, target_period)
         prediction = float(model.predict(np.asarray([features]))[0])
-
-        predictions.append(max(0.0, prediction))
-        history.append(max(0.0, prediction))
-
+        prediction = max(0.0, prediction)
+        predictions.append(prediction)
+        history.append(prediction)
     return np.asarray(predictions)
 
 
-def train_lstm(training_values):
+def train_lstm(training_values, training_periods):
+    """Train LSTM on 12-month sequences that do not cross calendar gaps."""
+    training_values = np.asarray(training_values, dtype=float)
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(
-        np.asarray(training_values).reshape(-1, 1)
-    )
+    scaled = scaler.fit_transform(training_values.reshape(-1, 1)).flatten()
 
     X, target = [], []
-
     for i in range(LOOKBACK, len(scaled)):
-        X.append(scaled[i - LOOKBACK:i, 0])
-        target.append(scaled[i, 0])
+        if not is_consecutive_window(training_periods, i - LOOKBACK, i):
+            continue
+        X.append(scaled[i - LOOKBACK:i])
+        target.append(scaled[i])
+
+    if len(X) < 5:
+        raise ValueError(
+            "Not enough valid consecutive 12-month sequences to train LSTM. "
+            "Check the date range and missing months."
+        )
 
     X = np.asarray(X).reshape(-1, LOOKBACK, 1)
     target = np.asarray(target)
 
+    tf.keras.utils.set_random_seed(42)
     model = Sequential([
         Input(shape=(LOOKBACK, 1)),
         LSTM(32, activation="tanh"),
         Dense(16, activation="relu"),
         Dense(1)
     ])
-
     model.compile(optimizer="adam", loss="mean_squared_error")
 
     early_stop = EarlyStopping(
@@ -482,40 +503,33 @@ def train_lstm(training_values):
         patience=5,
         restore_best_weights=True
     )
-
     model.fit(
         X,
         target,
         epochs=40,
         batch_size=8,
         verbose=0,
-        callbacks=[early_stop]
+        callbacks=[early_stop],
+        shuffle=False
     )
-
     return model, scaler
 
 
 def recursive_lstm_forecast(model, scaler, history, steps):
-    history_scaled = scaler.transform(
-        np.asarray(history, dtype=float).reshape(-1, 1)
-    ).flatten().tolist()
-
+    """Forecast recursively from the latest 12 consecutive observations."""
+    history = np.asarray(history, dtype=float)
+    if len(history) < LOOKBACK:
+        raise ValueError(f"At least {LOOKBACK} history values are required.")
+    history_scaled = scaler.transform(history.reshape(-1, 1)).flatten().tolist()
     predictions = []
 
     for _ in range(steps):
-        seq = np.asarray(
-            history_scaled[-LOOKBACK:]
-        ).reshape(1, LOOKBACK, 1)
-
+        seq = np.asarray(history_scaled[-LOOKBACK:]).reshape(1, LOOKBACK, 1)
         pred_scaled = float(model.predict(seq, verbose=0)[0][0])
-        history_scaled.append(pred_scaled)
-
-        pred_original = float(
-            scaler.inverse_transform([[pred_scaled]])[0][0]
-        )
-
+        pred_original = float(scaler.inverse_transform([[pred_scaled]])[0][0])
         pred_original = max(0.0, pred_original)
         predictions.append(pred_original)
+        history_scaled.append(float(scaler.transform([[pred_original]])[0][0]))
 
     return np.asarray(predictions)
 
@@ -523,15 +537,14 @@ def recursive_lstm_forecast(model, scaler, history, steps):
 def calculate_metrics(actual, predicted):
     mae = mean_absolute_error(actual, predicted)
     rmse = np.sqrt(mean_squared_error(actual, predicted))
-
-    nonzero = np.asarray(actual) != 0
+    actual = np.asarray(actual, dtype=float)
+    predicted = np.asarray(predicted, dtype=float)
+    nonzero = actual != 0
 
     if np.any(nonzero):
         mape = np.mean(
             np.abs(
-                (np.asarray(actual)[nonzero] -
-                 np.asarray(predicted)[nonzero]) /
-                np.asarray(actual)[nonzero]
+                (actual[nonzero] - predicted[nonzero]) / actual[nonzero]
             )
         ) * 100
     else:
@@ -544,30 +557,40 @@ def calculate_metrics(actual, predicted):
 
 st.header("4. Model Training and Evaluation")
 
-if st.button("🚀 Train Models and Generate Forecast", type="primary",
-             use_container_width=True):
+if st.button(
+    "🚀 Train Models and Generate Forecast",
+    type="primary",
+    use_container_width=True
+):
 
     progress = st.progress(0)
     status = st.empty()
 
     try:
-        split = len(y) - horizon
+        # Use up to 12 months from the latest uninterrupted segment for evaluation.
+        latest_segment_length = latest_contiguous_segment_length(dates)
+        evaluation_horizon = min(12, max(1, latest_segment_length - LOOKBACK))
+        split = len(y) - evaluation_horizon
         train_values = y[:split]
         train_dates = dates[:split]
 
-        if len(train_values) <= LOOKBACK:
-            st.error("Not enough training observations.")
-            st.stop()
+        if latest_segment_length <= LOOKBACK or len(train_values) <= LOOKBACK:
+            raise ValueError(
+                "There are not enough consecutive monthly records before the "
+                "evaluation period. At least 13 consecutive training months "
+                "are needed."
+            )
 
-        # Prepare evaluation data
-        status.info("Step 1 of 5: Preparing training and evaluation data...")
+        status.info("Step 1 of 5: Preparing gap-safe training and evaluation data...")
         progress.progress(10)
 
-        X_train, y_train = make_xgb_training_data(
-            train_values, train_dates
-        )
+        X_train, y_train = make_xgb_training_data(train_values, train_dates)
+        if len(X_train) < 5:
+            raise ValueError(
+                "Not enough valid XGBoost training sequences after excluding "
+                "windows that cross missing-month gaps."
+            )
 
-        # Train XGBoost
         status.info("Step 2 of 5: Training the XGBoost model...")
         progress.progress(25)
 
@@ -581,31 +604,30 @@ if st.button("🚀 Train Models and Generate Forecast", type="primary",
         )
         xgb_model.fit(X_train, y_train)
 
-        # Train LSTM
         status.info("Step 3 of 5: Training the LSTM model...")
         progress.progress(45)
 
-        lstm_model, scaler = train_lstm(train_values)
+        lstm_model, scaler = train_lstm(train_values, train_dates)
 
-        # Evaluate both models recursively over same holdout months
         status.info("Step 4 of 5: Evaluating both models on the same past months...")
         progress.progress(70)
 
         evaluation_dates = dates[split:]
         actual = y[split:]
 
+        # The holdout begins immediately after the training data.
+        # Recursive forecasts use the previous 12 months.
         xgb_test = recursive_xgb_forecast(
             xgb_model,
-            train_values,
+            train_values[-LOOKBACK:],
             evaluation_dates[0],
-            horizon
+            evaluation_horizon
         )
-
         lstm_test = recursive_lstm_forecast(
             lstm_model,
             scaler,
-            train_values,
-            horizon
+            train_values[-LOOKBACK:],
+            evaluation_horizon
         )
 
         xgb_metrics = calculate_metrics(actual, xgb_test)
@@ -617,11 +639,16 @@ if st.button("🚀 Train Models and Generate Forecast", type="primary",
             "XGBoost": list(xgb_metrics)
         })
 
-        # Forecast into the future using all observed history
-        status.info("Step 5 of 5: Generating future monthly forecasts...")
+        status.info(
+            "Step 5 of 5: Training final models and generating future forecasts..."
+        )
         progress.progress(85)
 
         all_X, all_y = make_xgb_training_data(y, dates)
+        if len(all_X) < 5:
+            raise ValueError(
+                "Not enough valid XGBoost training sequences in the full dataset."
+            )
 
         final_xgb = XGBRegressor(
             n_estimators=200,
@@ -633,16 +660,16 @@ if st.button("🚀 Train Models and Generate Forecast", type="primary",
         )
         final_xgb.fit(all_X, all_y)
 
-        final_lstm, final_scaler = train_lstm(y)
+        final_lstm, final_scaler = train_lstm(y, dates)
 
         last_period = dates[-1] + 1
+        latest_history = y[-LOOKBACK:]
 
         future_xgb = recursive_xgb_forecast(
-            final_xgb, y, last_period, horizon
+            final_xgb, latest_history, last_period, horizon
         )
-
         future_lstm = recursive_lstm_forecast(
-            final_lstm, final_scaler, y, horizon
+            final_lstm, final_scaler, latest_history, horizon
         )
 
         future_periods = [
@@ -669,12 +696,13 @@ if st.button("🚀 Train Models and Generate Forecast", type="primary",
         st.session_state["lstm_metrics"] = lstm_metrics
         st.session_state["xgb_metrics"] = xgb_metrics
         st.session_state["horizon"] = horizon
+        st.session_state["evaluation_horizon"] = evaluation_horizon
 
     except Exception as e:
         status.error("The process could not be completed.")
         st.error(
-            "Please check your data and the app logs for details. "
-            f"Error: {e}"
+            "Please check the uploaded dates, consumption values, and app logs. "
+            f"Details: {e}"
         )
 
 # -------------------- DISPLAY RESULTS --------------------
@@ -689,10 +717,16 @@ if "metrics_df" in st.session_state:
 
     st.header("5. Model Evaluation Results")
 
+    st.caption(
+        f"Evaluation window: "
+        f"{st.session_state.get('evaluation_horizon', len(evaluation_df))} "
+        "latest consecutive month(s). The future forecast horizon is selected separately."
+    )
+
     st.write(
-        "The table below compares the prediction errors of LSTM and XGBoost "
-        "on the same held-out historical months. Lower error values generally "
-        "indicate closer predictions for this evaluation period."
+        "The table compares both models on the same held-out historical months. "
+        "The evaluation uses up to 12 consecutive months from the latest "
+        "continuous segment. Lower errors mean closer predictions on this test period."
     )
 
     st.dataframe(
