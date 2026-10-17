@@ -663,9 +663,8 @@ elif page == "Forecast":
                 'consecutive months as their lookback window.</div>',
                 unsafe_allow_html=True
             )
-
             
-horizon = st.selectbox(
+            horizon = st.selectbox(
     "Forecast horizon",
     options=list(range(1, 13)),
     format_func=lambda x: f"{x} month(s)"
