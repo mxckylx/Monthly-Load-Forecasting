@@ -66,7 +66,9 @@ COLORS = {
     "LSTM": "#0e9384",
     "XGBoost": "#345b88",
     "Seasonal Naive": "#9aa7b5",
+    "Last-12 Avg": "#d49a3a",
 }
+BASELINES = ["Seasonal Naive", "Last-12 Avg"]
 
 # =====================================================================
 # SIDEBAR
@@ -84,7 +86,7 @@ with st.sidebar:
 
     page = st.radio(
         "WORKSPACE",
-        ["Home", "Forecast", "Model Comparison", "About"],
+        ["Home", "Forecast", "Rolling Test", "Model Comparison", "About"],
         key="navigation"
     )
 
@@ -564,7 +566,7 @@ if uploaded_file is not None:
         if st.session_state.get("data_sig") != sig:
             for k in ["metrics_rec", "metrics_one", "evaluation_df",
                       "forecast_df", "val_df", "metrics_val",
-                      "horizon", "evaluation_horizon"]:
+                      "horizon", "evaluation_horizon", "rolling"]:
                 st.session_state.pop(k, None)
             st.session_state["data_sig"] = sig
 
@@ -575,6 +577,108 @@ if uploaded_file is not None:
 def seasonal_naive(periods):
     """Same month last year (NaN when that month isn't in training data)."""
     return np.asarray([lookup.get(p - 12, np.nan) for p in periods], dtype=float)
+
+
+def onestep_last12(values, idxs):
+    """Average of the previous 12 ACTUAL months, for each target index."""
+    return np.asarray(
+        [float(np.mean(values[i - LOOKBACK:i])) for i in idxs], dtype=float
+    )
+
+
+def new_xgb():
+    return XGBRegressor(
+        n_estimators=300,
+        max_depth=3,
+        learning_rate=0.03,
+        subsample=0.9,
+        objective="reg:squarederror",
+        random_state=42,
+        n_jobs=1
+    )
+
+
+def rolling_candidate_years():
+    """Years that have all 12 months AND all 12 months of the year before
+    (needed as the lookback history for the first forecast month)."""
+    pset = set(dates)
+    out = []
+    for yr in sorted({d.year for d in dates}):
+        cur = [pd.Period(f"{yr}-{m:02d}", "M") for m in range(1, 13)]
+        if all(p in pset for p in cur) and all((p - 12) in pset for p in cur):
+            out.append(yr)
+    return out
+
+
+def run_rolling(test_years, progress=None, status=None):
+    """For each test year: train ONLY on months before that year, then
+    forecast the whole year. 2026+ is never part of `dates`."""
+    rows, details, counts, skipped = [], {}, {}, []
+
+    for k, yr in enumerate(test_years):
+        if status is not None:
+            status.info(
+                f"Round {k + 1} of {len(test_years)}: training on data "
+                f"before {yr}…"
+            )
+
+        tr_idx = [i for i, d in enumerate(dates) if d.year < yr]
+        te_idx = [i for i, d in enumerate(dates) if d.year == yr]
+        tr_dates = [dates[i] for i in tr_idx]
+        tr_y = y[tr_idx]
+        te_dates = [dates[i] for i in te_idx]
+        actual = y[te_idx]
+
+        try:
+            Xtr, ytr = make_xgb_training_data(tr_y, tr_dates)
+            if len(Xtr) < 12:
+                raise ValueError(f"only {len(Xtr)} training sequences")
+            xgb_m = new_xgb()
+            xgb_m.fit(Xtr, ytr)
+            lstm_m = train_lstm(tr_y, tr_dates)
+        except Exception as error:
+            skipped.append(f"{yr}: {error}")
+            continue
+
+        hist = [lookup[te_dates[0] - 12 + j] for j in range(LOOKBACK)]
+        n = len(te_idx)
+
+        xgb_rec = recursive_xgb_forecast(xgb_m, hist, te_dates[0], n)
+        lstm_rec = recursive_lstm_forecast(lstm_m, hist, te_dates[0] - 1, n)
+        xgb_one = onestep_xgb(xgb_m, y, dates, te_idx)
+        lstm_one = onestep_lstm(lstm_m, y, dates, te_idx)
+        naive = seasonal_naive(te_dates)
+        last_multi = np.full(n, float(np.mean(hist)))
+        last_one = onestep_last12(y, te_idx)
+
+        multi = {"LSTM": lstm_rec, "XGBoost": xgb_rec,
+                 "Seasonal Naive": naive, "Last-12 Avg": last_multi}
+        onest = {"LSTM": lstm_one, "XGBoost": xgb_one,
+                 "Seasonal Naive": naive, "Last-12 Avg": last_one}
+
+        for mode, preds in [("Multi-step", multi), ("One-step", onest)]:
+            for model_name, p in preds.items():
+                mae, rmse, mape = calculate_metrics(actual, p)
+                rows.append(dict(Year=yr, Mode=mode, Model=model_name,
+                                 MAE=mae, RMSE=rmse, MAPE=mape))
+
+        details[yr] = pd.DataFrame({
+            "Month": [str(d) for d in te_dates],
+            "Actual (kWh)": actual,
+            "LSTM multi-step": lstm_rec,
+            "XGBoost multi-step": xgb_rec,
+            "LSTM one-step": lstm_one,
+            "XGBoost one-step": xgb_one,
+            "Seasonal Naive": naive,
+            "Last-12 Avg multi-step": last_multi,
+            "Last-12 Avg one-step": last_one
+        })
+        counts[yr] = len(Xtr)
+
+        if progress is not None:
+            progress.progress(int((k + 1) / len(test_years) * 100))
+
+    return pd.DataFrame(rows), details, counts, skipped
 
 
 # =====================================================================
@@ -621,17 +725,21 @@ def verdict(metrics_df):
         return
 
     best = mape.idxmin()
-    if best == "Seasonal Naive":
+    base_txt = ", ".join(
+        f"{b}: {mape[b]:.2f}%" for b in BASELINES if b in mape.index
+    )
+
+    if best in BASELINES:
         st.warning(
-            f"The seasonal naive baseline has the lowest MAPE "
-            f"({mape[best]:.2f}%). Neither model beats 'same month last year' "
-            "on this period."
+            f"The {best} baseline has the lowest MAPE ({mape[best]:.2f}%). "
+            "The ML models do not beat it on this period. "
+            f"(Baselines: {base_txt})"
         )
     else:
-        msg = f"{best} has the lowest MAPE ({mape[best]:.2f}%)."
-        if "Seasonal Naive" in mape.index:
-            msg += f" Seasonal naive baseline: {mape['Seasonal Naive']:.2f}%."
-        st.success(msg)
+        st.success(
+            f"{best} has the lowest MAPE ({mape[best]:.2f}%). "
+            f"Baselines: {base_txt}."
+        )
 
 
 def render_block(note, metrics_df, detail_df, series_cols, key):
@@ -664,7 +772,7 @@ def render_block(note, metrics_df, detail_df, series_cols, key):
             x=detail_df["Month"], y=detail_df[col],
             mode="lines+markers", name=name,
             line=dict(color=COLORS.get(name), width=2,
-                      dash="dot" if name == "Seasonal Naive" else "solid")
+                      dash="dot" if name in BASELINES else "solid")
         ))
     fig.update_layout(title="Actual vs predicted",
                       yaxis_title="Consumption (kWh)")
@@ -960,16 +1068,22 @@ elif page == "Forecast":
                 lstm_one = onestep_lstm(lstm, y, dates, idxs)
 
                 naive_eval = seasonal_naive(eval_dates)
+                last12_multi = np.full(
+                    eval_h, float(np.mean(train_y[-LOOKBACK:]))
+                )
+                last12_one = onestep_last12(y, idxs)
 
                 metrics_rec = metrics_table(actual, {
                     "LSTM": lstm_rec,
                     "XGBoost": xgb_rec,
-                    "Seasonal Naive": naive_eval
+                    "Seasonal Naive": naive_eval,
+                    "Last-12 Avg": last12_multi
                 })
                 metrics_one = metrics_table(actual, {
                     "LSTM": lstm_one,
                     "XGBoost": xgb_one,
-                    "Seasonal Naive": naive_eval
+                    "Seasonal Naive": naive_eval,
+                    "Last-12 Avg": last12_one
                 })
 
                 evaluation = pd.DataFrame({
@@ -979,7 +1093,9 @@ elif page == "Forecast":
                     "XGBoost multi-step": xgb_rec,
                     "LSTM one-step": lstm_one,
                     "XGBoost one-step": xgb_one,
-                    "Seasonal Naive": naive_eval
+                    "Seasonal Naive": naive_eval,
+                    "Last-12 Avg multi-step": last12_multi,
+                    "Last-12 Avg one-step": last12_one
                 })
 
                 status.info(
@@ -1012,12 +1128,14 @@ elif page == "Forecast":
                     final_lstm, history, dates[-1], horizon
                 )
                 nf = seasonal_naive(future_periods)
+                af = np.full(horizon, float(np.mean(history)))
 
                 forecast = pd.DataFrame({
                     "Month": [str(p) for p in future_periods],
                     "LSTM Forecast (kWh)": lf,
                     "XGBoost Forecast (kWh)": xf,
-                    "Seasonal Naive (kWh)": nf
+                    "Seasonal Naive (kWh)": nf,
+                    "Last-12 Avg (kWh)": af
                 })
 
                 # 2026 validation against actuals the models never saw
@@ -1033,7 +1151,8 @@ elif page == "Forecast":
                         metrics_val = metrics_table(val_df["Actual (kWh)"], {
                             "LSTM": val_df["LSTM Forecast (kWh)"],
                             "XGBoost": val_df["XGBoost Forecast (kWh)"],
-                            "Seasonal Naive": val_df["Seasonal Naive (kWh)"]
+                            "Seasonal Naive": val_df["Seasonal Naive (kWh)"],
+                            "Last-12 Avg": val_df["Last-12 Avg (kWh)"]
                         })
                     else:
                         val_df = None
@@ -1103,6 +1222,14 @@ elif page == "Forecast":
                 line=dict(color=COLORS["Seasonal Naive"], width=2, dash="dot")
             ))
 
+            fig.add_trace(go.Scatter(
+                x=forecast_df["Month"],
+                y=forecast_df["Last-12 Avg (kWh)"],
+                mode="lines",
+                name="Last-12 Avg",
+                line=dict(color=COLORS["Last-12 Avg"], width=2, dash="dot")
+            ))
+
             if len(holdout_2026) > 0:
                 fig.add_trace(go.Scatter(
                     x=[str(p) for p in holdout_2026["_Date"]],
@@ -1129,6 +1256,224 @@ elif page == "Forecast":
                 "Download forecast CSV",
                 forecast_df.to_csv(index=False).encode("utf-8"),
                 "monthly_load_forecast.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
+# =====================================================================
+# ROLLING TEST PAGE
+# =====================================================================
+elif page == "Rolling Test":
+    page_header(
+        "WORKSPACE / ROLLING TEST",
+        "Test the models across several years",
+        "Each round trains only on the months before a test year, then "
+        "forecasts that whole year. Repeating this over several years gives "
+        "a fairer score than a single holdout. 2026 actuals are never used "
+        "here; they stay as a separate final check."
+    )
+
+    if uploaded_file is None:
+        st.info("Upload a CSV or Excel file from the sidebar first.")
+
+    elif data_error:
+        st.error(f"The uploaded data needs attention: {data_error}")
+
+    else:
+        candidates = rolling_candidate_years()
+
+        if not candidates:
+            st.warning(
+                "No test year is possible. A test year needs all 12 months "
+                "plus all 12 months of the year before it."
+            )
+        else:
+            sig_key = abs(hash(str(st.session_state.get("data_sig"))))
+            test_years = st.multiselect(
+                "Test years",
+                options=candidates,
+                default=candidates[-3:],
+                key=f"rolling_years_{sig_key}"
+            )
+            st.caption(
+                "Each round trains on every month BEFORE the test year. "
+                "It trains both models once per round, so it can take a few "
+                "minutes."
+            )
+
+            if st.button(
+                "Run rolling test",
+                type="primary",
+                use_container_width=True,
+                disabled=len(test_years) == 0
+            ):
+                progress = st.progress(0)
+                status = st.empty()
+                try:
+                    results, details, counts, skipped = run_rolling(
+                        sorted(test_years), progress, status
+                    )
+                    if results.empty:
+                        raise ValueError(
+                            "No round could be completed. "
+                            + "; ".join(skipped)
+                        )
+                    st.session_state["rolling"] = dict(
+                        results=results, details=details,
+                        counts=counts, skipped=skipped
+                    )
+                    progress.progress(100)
+                    status.success("Rolling test completed.")
+                except Exception as error:
+                    status.error("The rolling test could not be completed.")
+                    st.error(str(error))
+
+        if "rolling" in st.session_state:
+            R = st.session_state["rolling"]
+            results = R["results"]
+            details = R["details"]
+            counts = R["counts"]
+
+            if R["skipped"]:
+                st.warning("Skipped rounds: " + "; ".join(R["skipped"]))
+
+            order = ["LSTM", "XGBoost", "Seasonal Naive", "Last-12 Avg"]
+
+            mode = st.radio(
+                "Forecast mode",
+                ["Multi-step", "One-step"],
+                horizontal=True,
+                key="rolling_mode",
+                help="Multi-step: the model forecasts the whole year using "
+                     "only its own predictions. One-step: every month is "
+                     "predicted from the previous 12 actual months."
+            )
+
+            res = results[results["Mode"] == mode]
+            avg = (
+                res.groupby("Model")[["MAE", "RMSE", "MAPE"]]
+                .mean()
+                .reindex([m for m in order if m in set(res["Model"])])
+            )
+
+            st.markdown(
+                '<div class="section-heading">Average across all test years</div>'
+                '<div class="section-copy">Mean of the per-year scores. '
+                'Lower is better.</div>',
+                unsafe_allow_html=True
+            )
+
+            avg_show = avg.rename(columns={
+                "MAE": "MAE (kWh)", "RMSE": "RMSE (kWh)", "MAPE": "MAPE (%)"
+            })
+            st.dataframe(avg_show.round(2), use_container_width=True)
+
+            wide = pd.DataFrame({
+                "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
+                **{m: [avg.loc[m, "MAE"], avg.loc[m, "RMSE"],
+                       avg.loc[m, "MAPE"]] for m in avg.index}
+            })
+            verdict(wide)
+
+            st.markdown(
+                '<div class="section-heading">Score per test year</div>',
+                unsafe_allow_html=True
+            )
+
+            metric_pick = st.selectbox(
+                "Metric", ["MAPE", "MAE", "RMSE"], key="rolling_metric"
+            )
+
+            fig = go.Figure()
+            for m in order:
+                sub = res[res["Model"] == m].sort_values("Year")
+                if sub.empty:
+                    continue
+                fig.add_trace(go.Bar(
+                    name=m,
+                    x=[str(v) for v in sub["Year"]],
+                    y=sub[metric_pick],
+                    marker_color=COLORS.get(m)
+                ))
+            fig.update_layout(
+                title=f"{metric_pick} by test year ({mode.lower()})",
+                barmode="group",
+                xaxis_title="Test year",
+                yaxis_title=metric_pick + (" (%)" if metric_pick == "MAPE" else " (kWh)")
+            )
+            st.plotly_chart(chart_style(fig, 420), use_container_width=True,
+                            key="rolling_bar")
+
+            pivot = res.pivot(index="Year", columns="Model", values=metric_pick)
+            pivot = pivot[[m for m in order if m in pivot.columns]]
+            pivot.index = [str(v) for v in pivot.index]
+            st.dataframe(pivot.round(2), use_container_width=True)
+
+            st.caption(
+                "Training sequences per round: "
+                + ", ".join(f"{yr}: {n}" for yr, n in sorted(counts.items()))
+                + ". Fewer sequences usually means a weaker model."
+            )
+
+            st.markdown(
+                '<div class="section-heading">Actual vs predicted per round</div>',
+                unsafe_allow_html=True
+            )
+
+            tab_years = sorted(details.keys())
+            tabs = st.tabs([str(v) for v in tab_years])
+            suffix = "multi-step" if mode == "Multi-step" else "one-step"
+
+            for tab, yr in zip(tabs, tab_years):
+                with tab:
+                    d = details[yr]
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=d["Month"], y=d["Actual (kWh)"],
+                        mode="lines+markers", name="Actual",
+                        line=dict(color="#142b4a", width=3)
+                    ))
+                    series = {
+                        "LSTM": f"LSTM {suffix}",
+                        "XGBoost": f"XGBoost {suffix}",
+                        "Seasonal Naive": "Seasonal Naive",
+                        "Last-12 Avg": f"Last-12 Avg {suffix}"
+                    }
+                    for name, col in series.items():
+                        fig.add_trace(go.Scatter(
+                            x=d["Month"], y=d[col],
+                            mode="lines+markers", name=name,
+                            line=dict(
+                                color=COLORS.get(name), width=2,
+                                dash="dot" if name in BASELINES else "solid"
+                            )
+                        ))
+                    fig.update_layout(
+                        title=f"{yr}: actual vs predicted ({mode.lower()})",
+                        yaxis_title="Consumption (kWh)"
+                    )
+                    st.plotly_chart(chart_style(fig, 400),
+                                    use_container_width=True,
+                                    key=f"rolling_line_{yr}")
+                    st.dataframe(d.round(2), use_container_width=True,
+                                 hide_index=True)
+
+            all_details = pd.concat(
+                [d.assign(Year=yr) for yr, d in details.items()],
+                ignore_index=True
+            )
+            e1, e2 = st.columns(2)
+            e1.download_button(
+                "Rolling scores CSV",
+                results.to_csv(index=False).encode("utf-8"),
+                "rolling_test_scores.csv",
+                "text/csv",
+                use_container_width=True
+            )
+            e2.download_button(
+                "Rolling predictions CSV",
+                all_details.to_csv(index=False).encode("utf-8"),
+                "rolling_test_predictions.csv",
                 "text/csv",
                 use_container_width=True
             )
@@ -1181,7 +1526,8 @@ elif page == "Model Comparison":
                 metrics_rec, evaluation,
                 {"LSTM": "LSTM multi-step",
                  "XGBoost": "XGBoost multi-step",
-                 "Seasonal Naive": "Seasonal Naive"},
+                 "Seasonal Naive": "Seasonal Naive",
+                 "Last-12 Avg": "Last-12 Avg multi-step"},
                 "rec"
             )
 
@@ -1192,7 +1538,8 @@ elif page == "Model Comparison":
                 metrics_one, evaluation,
                 {"LSTM": "LSTM one-step",
                  "XGBoost": "XGBoost one-step",
-                 "Seasonal Naive": "Seasonal Naive"},
+                 "Seasonal Naive": "Seasonal Naive",
+                 "Last-12 Avg": "Last-12 Avg one-step"},
                 "one"
             )
 
@@ -1206,7 +1553,8 @@ elif page == "Model Comparison":
                     metrics_val, val_df,
                     {"LSTM": "LSTM Forecast (kWh)",
                      "XGBoost": "XGBoost Forecast (kWh)",
-                     "Seasonal Naive": "Seasonal Naive (kWh)"},
+                     "Seasonal Naive": "Seasonal Naive (kWh)",
+                     "Last-12 Avg": "Last-12 Avg (kWh)"},
                     "val"
                 )
 
@@ -1329,7 +1677,7 @@ else:
         'months. Duplicate months are averaged or summed (your choice in the '
         'sidebar), so review your source data before interpreting results. '
         'Pandemic months (2020–2021) can be excluded with a sidebar toggle, '
-        'and records from 2026 onward are held out for validation.</div>',
+        'and records from 2026 onward are never used for training or the rolling test; they are kept only as a final check.</div>',
         unsafe_allow_html=True
     )
 
