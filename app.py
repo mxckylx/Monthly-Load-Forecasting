@@ -790,7 +790,13 @@ elif page == "Forecast":
                 future_periods = [
                     dates[-1] + i for i in range(1, horizon + 1)
                 ]
-                history = y[-LOOKBACK:]
+               if latest_contiguous_segment_length(dates) < LOOKBACK:
+    raise ValueError(
+        "The latest 12 months must be consecutive. "
+        "Please check for missing months before forecasting."
+    )
+
+history = y[-LOOKBACK:]
 
                 xf = recursive_xgb_forecast(
                     final_xgb, history, future_periods[0], horizon
