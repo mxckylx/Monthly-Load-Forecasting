@@ -664,12 +664,13 @@ elif page == "Forecast":
                 unsafe_allow_html=True
             )
 
-            horizon = st.select_slider(
-                "Future forecast horizon",
-                options=[1, 2, 3],
-                value=3,
-                format_func=lambda n: "1 month" if n == 1 else f"{n} months"
-            )
+            
+horizon = st.selectbox(
+    "Forecast horizon",
+    options=list(range(1, 13)),
+    format_func=lambda x: f"{x} month(s)"
+)
+
 
             st.caption(
                 f"Forecast output: {horizon} future month(s) after {dates[-1]}."
