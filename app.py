@@ -9,6 +9,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Input
 from tensorflow.keras.callbacks import EarlyStopping
 import tensorflow as tf
+import io
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -21,58 +22,49 @@ st.set_page_config(
 )
 
 # -------------------- DESIGN --------------------
-
 st.markdown("""
 <style>
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-    max-width: 1200px;
-}
-.main-title {
-    font-size: 2.1rem;
-    font-weight: 750;
-    margin-bottom: 0.2rem;
-}
-.subtitle {
-    color: #777777;
-    margin-bottom: 1.5rem;
-}
-div[data-testid="stMetric"] {
-    background-color: rgba(128, 128, 128, 0.08);
-    padding: 16px;
-    border-radius: 12px;
-}
+:root { --brand: #0f766e; --brand-dark: #115e59; --ink: #172033; --muted: #64748b; }
+.block-container { padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 1250px; }
+[data-testid="stAppViewContainer"] { background: linear-gradient(180deg, rgba(15,118,110,.045) 0%, transparent 280px); }
+.hero { padding: 1.6rem 1.8rem; border-radius: 20px; background: linear-gradient(120deg, #0f766e 0%, #164e63 100%); color: white; margin-bottom: 1.25rem; box-shadow: 0 12px 32px rgba(15, 118, 110, .16); }
+.hero-kicker { text-transform: uppercase; letter-spacing: .13em; font-size: .75rem; font-weight: 700; opacity: .8; margin-bottom: .55rem; }
+.hero-title { font-size: clamp(1.7rem, 3vw, 2.55rem); font-weight: 800; line-height: 1.15; margin: 0; }
+.hero-subtitle { margin-top: .65rem; max-width: 780px; opacity: .9; font-size: 1rem; }
+.section-label { color: #0f766e; font-weight: 800; font-size: .76rem; letter-spacing: .12em; text-transform: uppercase; margin-bottom: -.5rem; }
+[data-testid="stMetric"] { background: var(--background-color); border: 1px solid rgba(100,116,139,.18); padding: 1rem 1.1rem; border-radius: 15px; box-shadow: 0 3px 12px rgba(15,23,42,.035); }
+[data-testid="stMetricLabel"] { color: var(--muted); font-weight: 600; }
+[data-testid="stMetricValue"] { font-weight: 800; }
+[data-testid="stFileUploader"] { border: 1.5px dashed rgba(15,118,110,.45); border-radius: 16px; padding: .8rem; background: rgba(15,118,110,.035); }
+.stButton > button[kind="primary"] { border-radius: 12px; border: 0; background: linear-gradient(90deg, #0f766e, #0e7490); font-weight: 750; min-height: 3rem; }
+.stDownloadButton > button { border-radius: 10px; font-weight: 650; }
+[data-testid="stDataFrame"] { border: 1px solid rgba(100,116,139,.18); border-radius: 12px; overflow: hidden; }
+[data-testid="stExpander"] { border-radius: 12px; border: 1px solid rgba(100,116,139,.2); }
+hr { border-color: rgba(100,116,139,.2); }
+.small-note { color: var(--muted); font-size: .88rem; }
+@media (max-width: 700px) { .hero { padding: 1.25rem; } .block-container { padding-left: 1rem; padding-right: 1rem; } }
 </style>
+
+<div class="hero">
+  <div class="hero-kicker">Energy analytics · Research prototype</div>
+  <div class="hero-title">⚡ Monthly Electrical Load Forecasting</div>
+  <div class="hero-subtitle">Explore historical electricity consumption, compare LSTM and XGBoost, and generate monthly forecasts to support energy planning.</div>
+</div>
 """, unsafe_allow_html=True)
 
-st.markdown(
-    '<div class="main-title">⚡ Monthly Electrical Load Forecasting</div>',
-    unsafe_allow_html=True
-)
-st.markdown(
-    '<div class="subtitle">Compare LSTM and XGBoost using historical monthly electricity consumption.</div>',
-    unsafe_allow_html=True
-)
-
 with st.expander("ℹ️ About this forecasting system"):
-    st.write("""
-    This application uses historical monthly electricity consumption to
-    forecast future consumption using two machine learning models:
+    st.markdown("""
+    This research application compares two forecasting approaches:
+    - **LSTM** learns sequential patterns from previous monthly consumption.
+    - **XGBoost** learns relationships from lagged consumption and calendar features.
 
-    - **LSTM:** A neural network designed to learn patterns from sequential data.
-    - **XGBoost:** A machine learning model that combines decision trees.
-
-    The models are evaluated using past months that are set aside from training.
-    Their evaluation results help users compare prediction errors.
-
-    Forecast results are estimates and should be interpreted together with
-    the quality and completeness of the uploaded data.
+    Evaluation scores describe performance on the selected historical test period. Forecasts are estimates, not guaranteed future bills.
     """)
 
 # -------------------- DATA UPLOAD --------------------
 
-st.header("1. Upload Historical Data")
+st.markdown('<div class="section-label">Step 01</div>', unsafe_allow_html=True)
+st.header("Upload Historical Data")
 
 st.write(
     "Upload an Excel or CSV file containing monthly electricity consumption. "
@@ -293,8 +285,7 @@ if invalid_count:
         f"{invalid_count} row(s) with invalid dates or consumption "
         "values were excluded. Please verify these rows in your source file."
     )
-
-# -------------------- CHECK MONTHLY CONTINUITY --------------------
+    # -------------------- CHECK MONTHLY CONTINUITY --------------------
 
 periods = data["_Date"].tolist()
 missing_months = []
@@ -331,7 +322,8 @@ if len(y) < 24:
 
 # -------------------- DATA SUMMARY --------------------
 
-st.header("2. Historical Consumption")
+st.markdown('<div class="section-label">Step 02</div>', unsafe_allow_html=True)
+st.header("Historical Consumption")
 
 col1, col2, col3 = st.columns(3)
 
@@ -362,13 +354,16 @@ history_fig.update_layout(
     yaxis_title="Consumption (kWh)",
     xaxis=dict(type="date"),
     template="plotly_white",
-    hovermode="x unified"
+    hovermode="x unified",
+    margin=dict(l=20, r=20, t=60, b=20),
+    title_font=dict(size=18)
 )
 st.plotly_chart(history_fig, use_container_width=True)
 
 # -------------------- FORECAST SETTINGS --------------------
 
-st.header("3. Forecast Settings")
+st.markdown('<div class="section-label">Step 03</div>', unsafe_allow_html=True)
+st.header("Forecast Settings")
 
 st.write(
     "Choose the number of future months to forecast. Model performance is "
@@ -520,6 +515,7 @@ def recursive_lstm_forecast(model, scaler, history, steps):
     history = np.asarray(history, dtype=float)
     if len(history) < LOOKBACK:
         raise ValueError(f"At least {LOOKBACK} history values are required.")
+
     history_scaled = scaler.transform(history.reshape(-1, 1)).flatten().tolist()
     predictions = []
 
@@ -551,25 +547,25 @@ def calculate_metrics(actual, predicted):
         mape = np.nan
 
     return mae, rmse, mape
+    # -------------------- TRAINING AND EVALUATION --------------------
 
-
-# -------------------- TRAINING AND EVALUATION --------------------
-
-st.header("4. Model Training and Evaluation")
+st.markdown('<div class="section-label">Step 04</div>', unsafe_allow_html=True)
+st.header("Model Training and Evaluation")
 
 if st.button(
     "🚀 Train Models and Generate Forecast",
     type="primary",
     use_container_width=True
 ):
-
     progress = st.progress(0)
     status = st.empty()
 
     try:
-        # Use up to 12 months from the latest uninterrupted segment for evaluation.
         latest_segment_length = latest_contiguous_segment_length(dates)
-        evaluation_horizon = min(12, max(1, latest_segment_length - LOOKBACK))
+        evaluation_horizon = min(
+            12,
+            max(1, latest_segment_length - LOOKBACK)
+        )
         split = len(y) - evaluation_horizon
         train_values = y[:split]
         train_dates = dates[:split]
@@ -581,10 +577,11 @@ if st.button(
                 "are needed."
             )
 
-        status.info("Step 1 of 5: Preparing gap-safe training and evaluation data...")
+        status.info("Step 1 of 5: Preparing training and evaluation data...")
         progress.progress(10)
 
         X_train, y_train = make_xgb_training_data(train_values, train_dates)
+
         if len(X_train) < 5:
             raise ValueError(
                 "Not enough valid XGBoost training sequences after excluding "
@@ -609,20 +606,19 @@ if st.button(
 
         lstm_model, scaler = train_lstm(train_values, train_dates)
 
-        status.info("Step 4 of 5: Evaluating both models on the same past months...")
+        status.info("Step 4 of 5: Evaluating both models...")
         progress.progress(70)
 
         evaluation_dates = dates[split:]
         actual = y[split:]
 
-        # The holdout begins immediately after the training data.
-        # Recursive forecasts use the previous 12 months.
         xgb_test = recursive_xgb_forecast(
             xgb_model,
             train_values[-LOOKBACK:],
             evaluation_dates[0],
             evaluation_horizon
         )
+
         lstm_test = recursive_lstm_forecast(
             lstm_model,
             scaler,
@@ -639,12 +635,11 @@ if st.button(
             "XGBoost": list(xgb_metrics)
         })
 
-        status.info(
-            "Step 5 of 5: Training final models and generating future forecasts..."
-        )
+        status.info("Step 5 of 5: Generating future forecasts...")
         progress.progress(85)
 
         all_X, all_y = make_xgb_training_data(y, dates)
+
         if len(all_X) < 5:
             raise ValueError(
                 "Not enough valid XGBoost training sequences in the full dataset."
@@ -666,10 +661,17 @@ if st.button(
         latest_history = y[-LOOKBACK:]
 
         future_xgb = recursive_xgb_forecast(
-            final_xgb, latest_history, last_period, horizon
+            final_xgb,
+            latest_history,
+            last_period,
+            horizon
         )
+
         future_lstm = recursive_lstm_forecast(
-            final_lstm, final_scaler, latest_history, horizon
+            final_lstm,
+            final_scaler,
+            latest_history,
+            horizon
         )
 
         future_periods = [
@@ -705,6 +707,7 @@ if st.button(
             f"Details: {e}"
         )
 
+
 # -------------------- DISPLAY RESULTS --------------------
 
 if "metrics_df" in st.session_state:
@@ -715,7 +718,11 @@ if "metrics_df" in st.session_state:
     lstm_metrics = st.session_state["lstm_metrics"]
     xgb_metrics = st.session_state["xgb_metrics"]
 
-    st.header("5. Model Evaluation Results")
+    st.markdown(
+        '<div class="section-label">Results</div>',
+        unsafe_allow_html=True
+    )
+    st.header("Model Evaluation Results")
 
     st.caption(
         f"Evaluation window: "
@@ -725,8 +732,7 @@ if "metrics_df" in st.session_state:
 
     st.write(
         "The table compares both models on the same held-out historical months. "
-        "The evaluation uses up to 12 consecutive months from the latest "
-        "continuous segment. Lower errors mean closer predictions on this test period."
+        "Lower errors mean closer predictions on this test period."
     )
 
     st.dataframe(
@@ -735,7 +741,6 @@ if "metrics_df" in st.session_state:
         hide_index=True
     )
 
-    # Dynamic model comparison
     metric_names = ["MAE", "RMSE", "MAPE"]
     metric_results = [
         (metric_names[0], lstm_metrics[0], xgb_metrics[0]),
@@ -745,7 +750,6 @@ if "metrics_df" in st.session_state:
 
     lstm_wins = 0
     xgb_wins = 0
-    ties = 0
     comparable_metrics = 0
 
     for name, lstm_value, xgb_value in metric_results:
@@ -755,7 +759,7 @@ if "metrics_df" in st.session_state:
         comparable_metrics += 1
 
         if np.isclose(lstm_value, xgb_value):
-            ties += 1
+            continue
         elif lstm_value < xgb_value:
             lstm_wins += 1
         else:
@@ -770,15 +774,15 @@ if "metrics_df" in st.session_state:
         )
     elif lstm_wins > xgb_wins:
         st.success(
-            f"LSTM had lower errors in {lstm_wins} of the {comparable_metrics} "
-            "comparable metrics. It performed better overall on these "
-            "evaluation months, but this does not guarantee better future results."
+            f"LSTM had lower errors in {lstm_wins} of the "
+            f"{comparable_metrics} comparable metrics. It performed better "
+            "on this evaluation period, but this does not guarantee better future results."
         )
     elif xgb_wins > lstm_wins:
         st.success(
-            f"XGBoost had lower errors in {xgb_wins} of the {comparable_metrics} "
-            "comparable metrics. It performed better overall on these "
-            "evaluation months, but this does not guarantee better future results."
+            f"XGBoost had lower errors in {xgb_wins} of the "
+            f"{comparable_metrics} comparable metrics. It performed better "
+            "on this evaluation period, but this does not guarantee better future results."
         )
     else:
         st.info(
@@ -792,39 +796,22 @@ if "metrics_df" in st.session_state:
         **1. MAE — Mean Absolute Error**
 
         MAE measures the average absolute difference between actual consumption
-        and predicted consumption. Its unit is **kWh**.
-
-        For example, an MAE of 500 kWh means that the model's predictions were
-        off by an average of 500 kWh during the evaluation period.
-
-        **Lower MAE is better** because predictions are closer to the actual values
-        on average.
+        and predicted consumption. Its unit is **kWh**. Lower MAE means closer
+        predictions on average.
 
         **2. RMSE — Root Mean Squared Error**
 
-        RMSE measures prediction error in kWh too, but it penalizes larger errors
-        more strongly than MAE.
-
-        For example, an RMSE of 700 kWh means the root-mean-square error was
-        700 kWh. It does not mean every prediction was wrong by exactly 700 kWh.
-
-        **Lower RMSE is better.** If RMSE is noticeably higher than MAE, some
-        larger prediction errors may be affecting the result.
+        RMSE also measures error in kWh but penalizes larger errors more strongly.
+        Lower RMSE is better.
 
         **3. MAPE — Mean Absolute Percentage Error**
 
         MAPE expresses the average absolute prediction error as a percentage of
-        actual consumption.
+        actual consumption. Lower MAPE is better. Actual values equal to zero
+        are excluded because division by zero is undefined.
 
-        For example, a MAPE of 5% means the average absolute percentage error
-        was 5% for the nonzero actual values included in the calculation.
-
-        **Lower MAPE is better.** MAPE is not calculated for actual values equal
-        to zero because division by zero is undefined.
-
-        **Important:** None of these metrics alone proves that a model is
-        universally accurate. Interpret them with the evaluation period, the
-        amount and quality of available data, and the forecasting objective.
+        **Important:** These metrics describe the selected evaluation period.
+        They do not guarantee that a model will be accurate for every future month.
         """)
 
     st.subheader("Evaluation: Actual vs Predicted")
@@ -867,7 +854,11 @@ if "metrics_df" in st.session_state:
         hide_index=True
     )
 
-    st.header("6. Future Monthly Forecast")
+    st.markdown(
+        '<div class="section-label">Forecast</div>',
+        unsafe_allow_html=True
+    )
+    st.header("Future Monthly Forecast")
 
     st.write(
         "These are estimated future consumption values from models retrained "
@@ -909,7 +900,11 @@ if "metrics_df" in st.session_state:
 
     # -------------------- DOWNLOADS --------------------
 
-    st.header("7. Download Results")
+    st.markdown(
+        '<div class="section-label">Export</div>',
+        unsafe_allow_html=True
+    )
+    st.header("Download Results")
 
     csv_forecast = forecast_df.to_csv(index=False).encode("utf-8")
     st.download_button(
