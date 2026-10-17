@@ -170,93 +170,77 @@ def recursive_xgb_forecast(model, history, start_period, steps):
 
     return np.asarray(predictions)
 
+def month_features(period):
+    """Encode calendar month so the LSTM can learn seasonal differences."""
+    angle = 2 * np.pi * period.month / 12
+    return [float(np.sin(angle)), float(np.cos(angle))]
+
+
 def train_lstm(training_values, training_periods):
     training_values = np.asarray(training_values, dtype=float)
     scaler = MinMaxScaler()
-
-    scaled = scaler.fit_transform(
-        training_values.reshape(-1, 1)
-    ).flatten()
+    scaled = scaler.fit_transform(training_values.reshape(-1, 1)).flatten()
 
     X, target = [], []
-
     for i in range(LOOKBACK, len(scaled)):
         if is_consecutive_window(training_periods, i - LOOKBACK, i):
-            X.append(scaled[i - LOOKBACK:i])
+            seq = []
+            for j in range(i - LOOKBACK, i):
+                seq.append([scaled[j]] + month_features(training_periods[j]))
+            X.append(seq)
             target.append(scaled[i])
 
-    if len(X) < 5:
+    if len(X) < 12:
         raise ValueError(
             "Not enough consecutive monthly sequences to train LSTM. "
-            "Check the date range and missing months."
+            "At least 12 valid training sequences are recommended."
         )
 
-    X = np.asarray(X).reshape(-1, LOOKBACK, 1)
-    target = np.asarray(target)
-
+    X = np.asarray(X, dtype=float).reshape(-1, LOOKBACK, 3)
+    target = np.asarray(target, dtype=float)
     tf.keras.utils.set_random_seed(42)
 
     model = Sequential([
-        Input(shape=(LOOKBACK, 1)),
-        LSTM(32, activation="tanh"),
-        Dense(16, activation="relu"),
+        Input(shape=(LOOKBACK, 3)),
+        LSTM(48, activation="tanh", dropout=0.10),
+        Dense(24, activation="relu"),
         Dense(1)
     ])
-
-    model.compile(optimizer="adam", loss="mean_squared_error")
-
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                  loss="mean_squared_error")
     model.fit(
-        X,
-        target,
-        epochs=40,
+        X, target,
+        epochs=100,
         batch_size=8,
         verbose=0,
-        callbacks=[
-            EarlyStopping(
-                monitor="loss",
-                patience=5,
-                restore_best_weights=True
-            )
-        ],
+        callbacks=[EarlyStopping(monitor="loss", patience=10,
+                                 restore_best_weights=True)],
         shuffle=False
     )
-
     return model, scaler
 
-def recursive_lstm_forecast(model, scaler, history, steps):
-    history = np.asarray(history, dtype=float)
 
+def recursive_lstm_forecast(model, scaler, history, start_period, steps):
+    history = np.asarray(history, dtype=float).tolist()
     if len(history) < LOOKBACK:
         raise ValueError("At least 12 history values are required.")
 
-    scaled_history = scaler.transform(
-        history.reshape(-1, 1)
-    ).flatten().tolist()
-
+    scaled_history = scaler.transform(np.asarray(history).reshape(-1, 1)).flatten().tolist()
+    history_periods = [start_period - (LOOKBACK - 1 - i) for i in range(LOOKBACK)]
     predictions = []
 
-    for _ in range(steps):
-        sequence = np.asarray(
-            scaled_history[-LOOKBACK:]
-        ).reshape(1, LOOKBACK, 1)
-
-        scaled_prediction = float(
-            model.predict(sequence, verbose=0)[0][0]
-        )
-
-        prediction = max(
-            0.0,
-            float(
-                scaler.inverse_transform(
-                    [[scaled_prediction]]
-                )[0][0]
-            )
-        )
-
+    for step in range(steps):
+        target_period = start_period + step
+        seq = []
+        for j in range(LOOKBACK):
+            period = history_periods[j]
+            seq.append([scaled_history[-LOOKBACK + j]] + month_features(period))
+        sequence = np.asarray(seq, dtype=float).reshape(1, LOOKBACK, 3)
+        scaled_prediction = float(model.predict(sequence, verbose=0)[0][0])
+        prediction = max(0.0, float(scaler.inverse_transform([[scaled_prediction]])[0][0]))
         predictions.append(prediction)
-        scaled_history.append(
-            float(scaler.transform([[prediction]])[0][0])
-        )
+        scaled_history.append(float(scaler.transform([[prediction]])[0][0]))
+        history_periods = history_periods[1:] + [target_period]
 
     return np.asarray(predictions)
 
@@ -443,6 +427,14 @@ if uploaded_file is not None:
             .agg({"_Consumption": "mean"})
         )
 
+        # Thesis rule: exclude the pandemic period and keep 2026 actuals
+        # out of model training so they can be checked separately.
+        before_filter_count = len(data)
+        data = data[
+            ~data["_Date"].apply(lambda p: p.year in (2020, 2021) or p.year >= 2026)
+        ].copy()
+        excluded_count = before_filter_count - len(data)
+
         if data.empty:
             raise ValueError("No valid date and consumption rows were found.")
 
@@ -454,6 +446,13 @@ if uploaded_file is not None:
 
         dates = data["_Date"].tolist()
         y = data["_Consumption"].astype(float).to_numpy()
+
+        if excluded_count > 0:
+            st.info(
+                f"Excluded {excluded_count} record(s) from training: "
+                "pandemic-period months (2020–2021) and records from 2026 onward. "
+                "2026 actual consumption is not used to train the models."
+            )
 
         missing_months = [
             f"{a + 1} to {b - 1}"
@@ -666,7 +665,7 @@ elif page == "Forecast":
             
             horizon = st.selectbox(
     "Forecast horizon",
-    options=list(range(1, 13)),
+    options=list(range(1, 25)),
     format_func=lambda x: f"{x} month(s)"
 )
 
@@ -726,9 +725,9 @@ elif page == "Forecast":
                 progress.progress(25)
 
                 xgb = XGBRegressor(
-                    n_estimators=200,
-                    max_depth=3,
-                    learning_rate=0.03,
+                    n_estimators=400,
+                    max_depth=4,
+                    learning_rate=0.025,
                     objective="reg:squarederror",
                     random_state=42,
                     n_jobs=1
@@ -751,7 +750,7 @@ elif page == "Forecast":
                 )
 
                 lstm_test = recursive_lstm_forecast(
-                    lstm, scaler, train_y[-LOOKBACK:], eval_h
+                    lstm, scaler, train_y[-LOOKBACK:], eval_dates[0] - 1, eval_h
                 )
 
                 xm = calculate_metrics(actual, xgb_test)
@@ -776,9 +775,9 @@ elif page == "Forecast":
                     )
 
                 final_xgb = XGBRegressor(
-                    n_estimators=200,
-                    max_depth=3,
-                    learning_rate=0.03,
+                    n_estimators=400,
+                    max_depth=4,
+                    learning_rate=0.025,
                     objective="reg:squarederror",
                     random_state=42,
                     n_jobs=1
@@ -790,20 +789,21 @@ elif page == "Forecast":
                 future_periods = [
                     dates[-1] + i for i in range(1, horizon + 1)
                 ]
-               if latest_contiguous_segment_length(dates) < LOOKBACK:
-    raise ValueError(
-        "The latest 12 months must be consecutive. "
-        "Please check for missing months before forecasting."
-    )
 
-history = y[-LOOKBACK:]
+                if latest_contiguous_segment_length(dates) < LOOKBACK:
+                    raise ValueError(
+                        "The latest 12 months in the training dataset must be "
+                        "consecutive. Please check for missing months before forecasting."
+                    )
+
+                history = y[-LOOKBACK:]
 
                 xf = recursive_xgb_forecast(
                     final_xgb, history, future_periods[0], horizon
                 )
 
                 lf = recursive_lstm_forecast(
-                    final_lstm, final_scaler, history, horizon
+                    final_lstm, final_scaler, history, dates[-1], horizon
                 )
 
                 forecast = pd.DataFrame({
