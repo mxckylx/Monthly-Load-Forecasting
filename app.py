@@ -1,3 +1,4 @@
+
 import warnings
 import numpy as np
 import pandas as pd
@@ -92,11 +93,6 @@ with st.sidebar:
         "Optional: upload 2026 actuals for validation",
         type=["xlsx", "xls", "csv"],
         help="For the AMTES–Meralco workbook, the app reads the '2026' sheet."
-    )
-    kwh_col_num = st.number_input(
-        "2026 Excel sheet: kWh column number (A=1, L=12)",
-        min_value=1, max_value=40, value=12, step=1,
-        help="Pick the same meter/column you used for training. Only used for Excel validation files."
     )
     st.caption("Training data: Date/Year + Month + Consumption_kWh. Keep 2026 actuals separate.")
 
@@ -477,7 +473,7 @@ def tune_hyperparameters(y, dates, hours, mode, val_start, test_start, progress=
 
     return best_x, best_l, pd.DataFrame(rows)
 
-def read_2026_validation_file(file, kwh_col_index=11):
+def read_2026_validation_file(file, kwh_col_index=11):  # 11 = column L, only used for the old AMTES workbook
     """Read separate 2026 actuals without ever adding them to training data."""
     if file is None:
         return pd.DataFrame(columns=["Month", "Actual (kWh)"])
@@ -496,34 +492,51 @@ def read_2026_validation_file(file, kwh_col_index=11):
         "dec": 12, "december": 12, "dec.": 12
     }
 
-    if file.name.lower().endswith(".csv"):
-        frame = pd.read_csv(file)
+    def parse_generic(frame):
+        frame = frame.copy()
         frame.columns = [str(c).strip().lower() for c in frame.columns]
         date_col = next((c for c in frame.columns if c in ["date", "month", "period"]), None)
         value_col = next((c for c in frame.columns if "consumption" in c or "kwh" in c or c == "actual"), None)
         if date_col is None or value_col is None:
-            raise ValueError("For a CSV, use columns named Date and Consumption_kWh.")
+            return None
         parsed_dates = pd.to_datetime(frame[date_col], errors="coerce").dt.to_period("M")
         values = pd.to_numeric(frame[value_col], errors="coerce")
-        out = pd.DataFrame({"_period": parsed_dates, "Actual (kWh)": values}).dropna()
-        out = out[out["_period"].apply(lambda p: p.year == 2026)]
+        res = pd.DataFrame({"_period": parsed_dates, "Actual (kWh)": values}).dropna()
+        return res[res["_period"].apply(lambda p: p.year == 2026)]
+
+    if file.name.lower().endswith(".csv"):
+        out = parse_generic(pd.read_csv(file))
+        if out is None:
+            raise ValueError("For a CSV, use columns named Date and Consumption_kWh.")
     else:
         # Sheet '2026', month labels in column A, kWh in the column chosen in the sidebar.
         book = pd.ExcelFile(file)
         sheet = next((x for x in book.sheet_names if x.strip().lower() == "2026"), None)
         if sheet is None:
-            raise ValueError("Excel validation file needs a sheet named '2026'.")
-        frame = pd.read_excel(file, sheet_name=sheet, header=None)
-        rows = []
-        for _, row in frame.iterrows():
-            label = str(row.iloc[0]).strip().lower().replace("\n", " ") if len(row) else ""
-            key = label.split()[0] if label else ""
-            month_num = month_map.get(key)
-            if month_num and len(row) > kwh_col_index:
-                value = pd.to_numeric(pd.Series([row.iloc[kwh_col_index]]), errors="coerce").iloc[0]
-                if pd.notna(value):
-                    rows.append((pd.Period(year=2026, month=month_num, freq="M"), float(value)))
-        out = pd.DataFrame(rows, columns=["_period", "Actual (kWh)"])
+            # Simple layout: first sheet with Date + Consumption_kWh columns
+            out = parse_generic(pd.read_excel(file, sheet_name=book.sheet_names[0]))
+            if out is None:
+                raise ValueError("Excel validation file needs a sheet named '2026', or columns named Date and Consumption_kWh.")
+            if out.empty:
+                raise ValueError("No 2026 actual monthly consumption values were found in the validation file.")
+            sheet = None
+        if sheet is not None:
+            frame = pd.read_excel(file, sheet_name=sheet, header=None)
+            rows = []
+            for _, row in frame.iterrows():
+                label = str(row.iloc[0]).strip().lower().replace("\n", " ") if len(row) else ""
+                key = label.split()[0] if label else ""
+                month_num = month_map.get(key)
+                if month_num and len(row) > kwh_col_index:
+                    value = pd.to_numeric(pd.Series([row.iloc[kwh_col_index]]), errors="coerce").iloc[0]
+                    if pd.notna(value):
+                        rows.append((pd.Period(year=2026, month=month_num, freq="M"), float(value)))
+            out = pd.DataFrame(rows, columns=["_period", "Actual (kWh)"])
+            if out.empty:
+                # Sheet is named 2026 but uses the simple Date + Consumption_kWh layout
+                generic = parse_generic(pd.read_excel(file, sheet_name=sheet))
+                if generic is not None:
+                    out = generic
 
     if out.empty:
         raise ValueError("No 2026 actual monthly consumption values were found in the validation file.")
@@ -784,7 +797,7 @@ validation_actuals = pd.DataFrame(columns=["Month", "Actual (kWh)"])
 validation_error = None
 if validation_file is not None:
     try:
-        validation_actuals = read_2026_validation_file(validation_file, int(kwh_col_num) - 1)
+        validation_actuals = read_2026_validation_file(validation_file)
     except Exception as error:
         validation_error = str(error)
 
@@ -1531,7 +1544,7 @@ elif page == "Model Comparison":
                 if ratio > 1.5 or ratio < 0.67:
                     st.warning(
                         f"The 2026 actuals average is {ratio:.2f}× the average of the last 12 training months. "
-                        "This looks like a different meter/column or unit. Check the kWh column number in the sidebar."
+                        "This looks like a different meter/column or unit. Check that the 2026 file uses the same meter/column as the training data."
                     )
 
             overlap = forecast.merge(validation_actuals, on="Month", how="inner")
