@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 from tensorflow.keras.models import Sequential
@@ -12,1680 +13,328 @@ from tensorflow.keras.callbacks import EarlyStopping
 
 warnings.filterwarnings("ignore")
 tf.get_logger().setLevel("ERROR")
+st.set_page_config(page_title="Monthly Load Forecasting", page_icon="⚡", layout="wide")
 
-st.set_page_config(
-    page_title="Load Forecast Studio",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.markdown(r"""
+st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap');
-:root{--navy:#142b4a;--teal:#0e9384;--ink:#172b45;--muted:#708096;--line:#e4eaf1;--wash:#f5f8fb;}
-html,body,[class*="css"]{font-family:'DM Sans',sans-serif;color:var(--ink)}
-[data-testid="stAppViewContainer"]{background:#f7f9fc}
-[data-testid="stHeader"]{background:rgba(247,249,252,.9)}
-.block-container{max-width:1440px;padding-top:2rem;padding-bottom:3rem}
-[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--line)}
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p{font-size:.9rem}
-.brand-lockup{display:flex;align-items:center;gap:12px;padding:8px 2px 22px;border-bottom:1px solid var(--line);margin-bottom:22px}
-.brand-icon{width:42px;height:42px;border-radius:13px;background:#e2f5f2;color:#087d73;display:flex;align-items:center;justify-content:center;font-size:23px;font-weight:800}
-.brand-name{font-family:Manrope,sans-serif;font-weight:800;font-size:1.02rem;color:var(--navy);line-height:1.15}
-.brand-caption{font-size:.72rem;color:#7d8ca0;margin-top:4px;letter-spacing:.04em}
-.eyebrow{text-transform:uppercase;letter-spacing:.13em;font-size:.7rem;font-weight:800;color:var(--teal);margin-bottom:8px}
-.page-title{font-family:Manrope,sans-serif;font-size:clamp(1.8rem,3vw,2.45rem);font-weight:800;letter-spacing:-.045em;line-height:1.15;color:var(--navy);margin:0}
-.page-subtitle{color:var(--muted);font-size:.98rem;margin-top:10px;max-width:780px;line-height:1.65}
-.hero{background:linear-gradient(120deg,#142b4a 0%,#1a4564 70%,#176b70 100%);border-radius:22px;padding:30px 32px;color:white;margin:14px 0 24px;position:relative;overflow:hidden}
-.hero:after{content:'';position:absolute;width:280px;height:280px;border:1px solid rgba(255,255,255,.13);border-radius:50%;right:-50px;top:-115px;box-shadow:0 0 0 35px rgba(255,255,255,.035),0 0 0 70px rgba(255,255,255,.025)}
-.hero-label{font-size:.72rem;letter-spacing:.15em;text-transform:uppercase;color:#a8e7dd;font-weight:800;margin-bottom:12px}
-.hero-title{font-family:Manrope,sans-serif;font-size:clamp(1.65rem,3vw,2.5rem);font-weight:800;line-height:1.15;letter-spacing:-.04em;max-width:750px}
-.hero-copy{font-size:.95rem;color:#d7e5ef;line-height:1.7;max-width:680px;margin-top:12px}
-.section-heading{font-family:Manrope,sans-serif;font-size:1.15rem;font-weight:800;color:var(--navy);margin:1.4rem 0 .25rem}
-.section-copy{color:var(--muted);font-size:.9rem;line-height:1.6;margin-bottom:1rem}
-[data-testid="stMetric"]{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:0 4px 16px rgba(20,43,74,.035)}
-[data-testid="stMetricLabel"]{color:#77869a;font-size:.82rem;font-weight:600}
-[data-testid="stMetricValue"]{font-family:Manrope,sans-serif;color:var(--navy);font-weight:800;font-size:1.6rem}
-[data-testid="stMetricDelta"]{font-size:.78rem}
-[data-testid="stFileUploader"]{background:#fff;border:1.5px dashed #c8d6e2;border-radius:14px;padding:10px}
-.stButton>button[kind="primary"]{background:var(--teal);border:1px solid var(--teal);color:#fff;border-radius:11px;min-height:3rem;font-weight:700;box-shadow:0 5px 14px rgba(14,147,132,.15)}
-.stButton>button[kind="primary"]:hover{background:#08796f;border-color:#08796f}
-.stButton>button:not([kind="primary"]),.stDownloadButton>button{border-radius:10px;border:1px solid #d8e1ea;font-weight:650}
-[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff}
-[data-testid="stExpander"]{border:1px solid var(--line);border-radius:12px;background:#fff}
-[data-testid="stRadio"] label{font-weight:600}
-hr{border-color:var(--line)}
-.note{color:var(--muted);font-size:.8rem;line-height:1.55}
-.status-pill{display:inline-block;background:#e2f5f2;color:#087d73;border-radius:100px;padding:5px 10px;font-size:.72rem;font-weight:800;letter-spacing:.03em}
-@media(max-width:700px){.block-container{padding:1rem 1rem 2rem}.hero{padding:23px 20px;border-radius:17px}.page-title{font-size:1.8rem}}
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
+html, body, [class*="css"] {font-family:'DM Sans',sans-serif;}
+[data-testid="stAppViewContainer"] {background:#f6f8fb;}
+.block-container {max-width:1250px;padding-top:2rem;padding-bottom:3rem;}
+[data-testid="stSidebar"] {background:#fff;border-right:1px solid #e4eaf1;}
+[data-testid="stMetric"] {background:white;border:1px solid #e4eaf1;border-radius:14px;padding:16px;}
+.hero {padding:26px 28px;border-radius:18px;background:linear-gradient(120deg,#142b4a,#176b70);color:white;margin-bottom:22px;}
+.hero h1 {font-family:Manrope,sans-serif;color:white;font-size:2rem;margin:0 0 8px 0;}
+.muted {color:#718096;font-size:.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
-COLORS = {
-    "LSTM": "#0e9384",
-    "XGBoost": "#345b88",
-    "Seasonal Naive": "#9aa7b5",
-    "Last-12 Avg": "#d49a3a",
-}
-BASELINES = ["Seasonal Naive", "Last-12 Avg"]
-
-# =====================================================================
-# SIDEBAR
-# =====================================================================
-exclude_pandemic = True
-dup_mode = "Average"
+LOOKBACK = 12
+MONTH_NAMES = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
+MONTH_MAP = {name.lower(): num for num, name in MONTH_NAMES.items()}
+MONTH_MAP.update({name[:3].lower(): num for num, name in MONTH_NAMES.items()})
 
 with st.sidebar:
-    st.markdown(
-        '<div class="brand-lockup"><div class="brand-icon">ϟ</div>'
-        '<div><div class="brand-name">Load Forecast<br>Studio</div>'
-        '<div class="brand-caption">MONTHLY ENERGY ANALYTICS</div></div></div>',
-        unsafe_allow_html=True
-    )
-
-    page = st.radio(
-        "WORKSPACE",
-        ["Home", "Forecast", "Rolling Test", "Model Comparison", "About"],
-        key="navigation"
-    )
-
+    st.markdown("## ⚡ Monthly Load Forecasting")
+    page = st.radio("MENU", ["Home", "Forecast", "Model Comparison"])
     st.divider()
-    st.markdown("**DATA SOURCE**")
-
-    uploaded_file = st.file_uploader(
-        "Upload monthly data",
-        type=["xlsx", "xls", "csv"],
-        help="CSV or Excel with Year, Month, Consumption_kWh, or a date column."
-    )
-
-    st.caption("Recommended columns: Year · Month · Consumption_kWh")
-
-    if uploaded_file is not None:
-        st.markdown(
-            '<span class="status-pill">FILE SELECTED</span>',
-            unsafe_allow_html=True
-        )
-        st.markdown("**DATA OPTIONS**")
-        exclude_pandemic = st.checkbox(
-            "Exclude pandemic months (2020–2021)",
-            value=True,
-            key="exclude_pandemic"
-        )
-        dup_mode = st.selectbox(
-            "If a month appears more than once",
-            ["Average", "Sum"],
-            key="dup_mode",
-            help="Use Sum if the rows are separate meters/feeders that "
-                 "add up to the total load."
-        )
-
-    st.divider()
-    st.markdown(
-        '<div class="note">Research prototype · LSTM + XGBoost<br>'
-        'Forecasts are estimates, not actual utility bills.</div>',
-        unsafe_allow_html=True
-    )
-
-# =====================================================================
-# MODEL LOGIC
-# =====================================================================
-LOOKBACK = 12
+    uploaded_file = st.file_uploader("Upload monthly data", type=["csv", "xlsx", "xls"])
+    st.caption("Required: Year, Month, Consumption_kWh. Operating_Hours is needed to use operating hours in the models.")
 
 
-def is_consecutive_window(periods, start_idx, end_idx):
-    window = periods[start_idx:end_idx + 1]
-    return len(window) <= 1 or all(
-        window[j].ordinal - window[j - 1].ordinal == 1
-        for j in range(1, len(window))
-    )
+def parse_month(v):
+    if pd.isna(v):
+        return np.nan
+    s = str(v).strip().lower()
+    if s in MONTH_MAP:
+        return MONTH_MAP[s]
+    try:
+        n = int(float(s))
+        return n if 1 <= n <= 12 else np.nan
+    except (ValueError, TypeError):
+        dt = pd.to_datetime(s, errors="coerce")
+        return int(dt.month) if pd.notna(dt) else np.nan
 
 
-def latest_contiguous_segment_length(periods):
-    if not periods:
-        return 0
+def prepare_data(file):
+    if file is None:
+        return None, None
+    file.seek(0)
+    frame = pd.read_csv(file) if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    frame.columns = [str(c).strip() for c in frame.columns]
+    lookup = {c.lower().strip(): c for c in frame.columns}
+    year_col = lookup.get("year")
+    month_col = lookup.get("month")
+    cons_col = next((lookup[k] for k in ["consumption_kwh", "consumption (kwh)", "electricity consumption (kwh)", "consumption", "kwh"] if k in lookup), None)
+    hours_col = next((lookup[k] for k in ["operating_hours", "operating hours", "total hours", "total_hrs", "hours"] if k in lookup), None)
+    date_col = next((lookup[k] for k in ["date", "period", "month_date", "billing_date"] if k in lookup), None)
+    if cons_col is None:
+        cons_col = next((c for c in frame.columns if "consumption" in c.lower() or "kwh" in c.lower()), None)
+    if cons_col is None:
+        raise ValueError("Cannot find the consumption column. Name it Consumption_kWh.")
+    if year_col and month_col:
+        years = pd.to_numeric(frame[year_col], errors="coerce")
+        months = frame[month_col].apply(parse_month)
+        dates = [pd.Period(year=int(y), month=int(m), freq="M") if pd.notna(y) and pd.notna(m) else pd.NaT for y, m in zip(years, months)]
+    elif date_col:
+        dates = pd.to_datetime(frame[date_col], errors="coerce").dt.to_period("M")
+    else:
+        raise ValueError("Include Year and Month columns, or one Date column.")
+    out = pd.DataFrame({"Period": dates, "Consumption_kWh": pd.to_numeric(frame[cons_col], errors="coerce")})
+    if hours_col:
+        out["Operating_Hours"] = pd.to_numeric(frame[hours_col], errors="coerce")
+    else:
+        out["Operating_Hours"] = np.nan
+    out = out.dropna(subset=["Period", "Consumption_kWh"])
+    out = out[out["Period"].apply(lambda p: p.year not in (2020, 2021) and p.year < 2026)].copy()
+    out = out.groupby("Period", as_index=False).agg({"Consumption_kWh":"mean", "Operating_Hours":"mean"}).sort_values("Period")
+    if len(out) < 24:
+        raise ValueError("Please upload at least 24 valid monthly records for training.")
+    if (out["Consumption_kWh"] < 0).any():
+        raise ValueError("Consumption cannot be negative.")
+    return out.reset_index(drop=True), hours_col is not None
 
-    count = 1
-    for i in range(len(periods) - 1, 0, -1):
-        if periods[i].ordinal - periods[i - 1].ordinal != 1:
-            break
-        count += 1
 
-    return count
+def period_consecutive(periods, start, end):
+    return all(periods[i].ordinal - periods[i-1].ordinal == 1 for i in range(start+1, end+1))
 
 
 def month_features(period):
-    """Encode calendar month as sin/cos so models can learn seasonality."""
     angle = 2 * np.pi * period.month / 12
-    return [float(np.sin(angle)), float(np.cos(angle))]
+    return [np.sin(angle), np.cos(angle)]
 
 
-# ---------- XGBoost (window-normalized) ----------
-def xgb_features(history, target_period):
-    """Features are the last 12 values divided by their own mean, so the
-    model learns the *shape* (seasonality/trend) and not the absolute level.
-    Returns (features, base). Multiply the predicted ratio by base."""
-    h = np.asarray(history, dtype=float)
-
-    if len(h) < LOOKBACK:
-        raise ValueError("At least 12 consecutive monthly values are needed.")
-
-    window = h[-LOOKBACK:]
-    base = float(np.mean(window))
-    if base <= 0:
-        base = 1.0
-    hn = window / base
-
-    features = [float(hn[-lag]) for lag in range(1, LOOKBACK + 1)]
-    features += [float(np.mean(hn[-3:])), float(np.mean(hn[-6:]))]
-    features += month_features(target_period)
-
-    return features, base
+def xgb_features(values, hours, periods, i, future_hours=None):
+    vals = np.asarray(values[max(0, i-LOOKBACK):i], dtype=float)
+    if len(vals) != LOOKBACK:
+        raise ValueError("Need 12 consecutive months before the prediction period.")
+    h = np.asarray(hours[max(0, i-LOOKBACK):i], dtype=float)
+    h = np.nan_to_num(h, nan=float(np.nanmean(hours)) if np.isfinite(hours).any() else 0.0)
+    target_period = periods[i] if i < len(periods) else periods[-1] + 1
+    next_hours = float(future_hours if future_hours is not None else 0.0)
+    return list(vals[::-1]) + [float(vals[-3:].mean()), float(vals[-6:].mean()), float(vals.mean()), *month_features(target_period), next_hours, float(h[-1]), float(np.mean(h[-3:])), float(np.mean(h[-6:])), float(np.mean(h))]
 
 
-def make_xgb_training_data(values, periods):
-    X, target = [], []
-
+def make_xgb_data(values, hours, periods):
+    X, y = [], []
     for i in range(LOOKBACK, len(values)):
-        if is_consecutive_window(periods, i - LOOKBACK, i):
-            f, base = xgb_features(values[i - LOOKBACK:i], periods[i])
-            X.append(f)
-            target.append(values[i] / base)
-
-    return np.asarray(X, dtype=float), np.asarray(target, dtype=float)
-
-
-def recursive_xgb_forecast(model, history, start_period, steps):
-    """start_period = FIRST month to forecast."""
-    history = list(np.asarray(history, dtype=float))
-    predictions = []
-
-    for step in range(steps):
-        f, base = xgb_features(history, start_period + step)
-        ratio = float(model.predict(np.asarray([f], dtype=float))[0])
-        prediction = max(0.0, ratio * base)
-        predictions.append(prediction)
-        history.append(prediction)
-
-    return np.asarray(predictions)
+        if period_consecutive(periods, i-LOOKBACK, i):
+            X.append(xgb_features(values, hours, periods, i, hours[i]))
+            y.append(values[i])
+    if not X:
+        raise ValueError("Not enough consecutive months to train XGBoost.")
+    return np.asarray(X, dtype=float), np.asarray(y, dtype=float)
 
 
-def onestep_xgb(model, values, periods, idxs):
-    """One-step-ahead using ACTUAL history for each target index."""
-    feats, bases = [], []
-    for i in idxs:
-        f, b = xgb_features(values[i - LOOKBACK:i], periods[i])
-        feats.append(f)
-        bases.append(b)
-    pred = model.predict(np.asarray(feats, dtype=float)) * np.asarray(bases)
-    return np.maximum(pred, 0.0)
-
-
-# ---------- LSTM (window-normalized) ----------
-def lstm_sequence(window_values, window_periods):
-    """Returns (sequence[LOOKBACK, 3], base)."""
-    w = np.asarray(window_values, dtype=float)
-    base = float(np.mean(w))
-    if base <= 0:
-        base = 1.0
-    seq = [[float(w[j] / base)] + month_features(window_periods[j])
-           for j in range(LOOKBACK)]
-    return seq, base
-
-
-def train_lstm(values, periods):
-    X, target = [], []
-
-    for i in range(LOOKBACK, len(values)):
-        if is_consecutive_window(periods, i - LOOKBACK, i):
-            seq, base = lstm_sequence(values[i - LOOKBACK:i],
-                                      periods[i - LOOKBACK:i])
-            X.append(seq)
-            target.append(values[i] / base)
-
-    if len(X) < 12:
-        raise ValueError(
-            "Not enough consecutive monthly sequences to train LSTM. "
-            "At least 12 valid training sequences are recommended."
-        )
-
-    X = np.asarray(X, dtype=float).reshape(-1, LOOKBACK, 3)
-    target = np.asarray(target, dtype=float)
-    tf.keras.utils.set_random_seed(42)
-
-    model = Sequential([
-        Input(shape=(LOOKBACK, 3)),
-        LSTM(32, activation="tanh", dropout=0.10),
-        Dense(16, activation="relu"),
-        Dense(1)
-    ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.003),
-                  loss="mean_squared_error")
-    model.fit(
-        X, target,
-        epochs=200,
-        batch_size=8,
-        verbose=0,
-        callbacks=[EarlyStopping(monitor="loss", patience=20,
-                                 restore_best_weights=True)],
-        shuffle=False
-    )
+def train_xgb(values, hours, periods):
+    X, target = make_xgb_data(values, hours, periods)
+    model = XGBRegressor(n_estimators=250, max_depth=2, learning_rate=0.03, subsample=0.9, colsample_bytree=0.9, objective="reg:squarederror", random_state=42)
+    model.fit(X, target)
     return model
 
 
-def recursive_lstm_forecast(model, history, last_period, steps):
-    """last_period = LAST month of the history (not the first forecast month)."""
-    vals = list(np.asarray(history, dtype=float)[-LOOKBACK:])
-    if len(vals) < LOOKBACK:
-        raise ValueError("At least 12 history values are required.")
-
-    pers = [last_period - (LOOKBACK - 1 - i) for i in range(LOOKBACK)]
-    predictions = []
-
-    for step in range(steps):
-        seq, base = lstm_sequence(vals[-LOOKBACK:], pers[-LOOKBACK:])
-        ratio = float(model.predict(
-            np.asarray([seq], dtype=float), verbose=0)[0][0])
-        prediction = max(0.0, ratio * base)
-        predictions.append(prediction)
-        vals.append(prediction)
-        # FIX: the predicted month is last_period + step + 1
-        pers.append(last_period + step + 1)
-
-    return np.asarray(predictions)
-
-
-def onestep_lstm(model, values, periods, idxs):
-    seqs, bases = [], []
-    for i in idxs:
-        s, b = lstm_sequence(values[i - LOOKBACK:i], periods[i - LOOKBACK:i])
-        seqs.append(s)
-        bases.append(b)
-    pred = model.predict(
-        np.asarray(seqs, dtype=float).reshape(-1, LOOKBACK, 3), verbose=0
-    ).flatten() * np.asarray(bases)
-    return np.maximum(pred, 0.0)
+def train_lstm(values, hours, periods):
+    values = np.asarray(values, dtype=float)
+    hours = np.asarray(hours, dtype=float)
+    hours = np.nan_to_num(hours, nan=float(np.nanmean(hours)) if np.isfinite(hours).any() else 0.0)
+    y_scaler = MinMaxScaler()
+    h_scaler = MinMaxScaler()
+    y_scaled = y_scaler.fit_transform(values.reshape(-1,1)).ravel()
+    h_scaled = h_scaler.fit_transform(hours.reshape(-1,1)).ravel()
+    X, target = [], []
+    for i in range(LOOKBACK, len(values)):
+        if period_consecutive(periods, i-LOOKBACK, i):
+            seq = [[y_scaled[j], *month_features(periods[j]), h_scaled[j]] for j in range(i-LOOKBACK, i)]
+            X.append(seq)
+            target.append(y_scaled[i])
+    if len(X) < 8:
+        raise ValueError("Not enough consecutive monthly records to train LSTM. Use at least 24 months without gaps.")
+    tf.keras.utils.set_random_seed(42)
+    model = Sequential([Input(shape=(LOOKBACK, 4)), LSTM(32, activation="tanh"), Dense(16, activation="relu"), Dense(1)])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mse")
+    model.fit(np.asarray(X, dtype=float), np.asarray(target), epochs=80, batch_size=8, verbose=0, shuffle=False, callbacks=[EarlyStopping(monitor="loss", patience=8, restore_best_weights=True)])
+    return model, y_scaler, h_scaler
 
 
-# ---------- Metrics ----------
-def calculate_metrics(actual, predicted):
-    a = np.asarray(actual, dtype=float)
-    p = np.asarray(predicted, dtype=float)
-    mask = np.isfinite(a) & np.isfinite(p)
+def predict_lstm(model, y_scaler, h_scaler, values, hours, periods, future_hours):
+    values = list(map(float, values))
+    hours = list(map(float, hours))
+    preds = []
+    for step, fh in enumerate(future_hours):
+        target_period = periods[-1] + (step + 1)
+        y_scaled = y_scaler.transform(np.asarray(values[-LOOKBACK:]).reshape(-1,1)).ravel()
+        hs = np.asarray(hours[-LOOKBACK:], dtype=float)
+        hs = np.nan_to_num(hs, nan=float(np.nanmean(hours)) if np.isfinite(hours).any() else 0.0)
+        h_scaled = h_scaler.transform(hs.reshape(-1,1)).ravel()
+        recent_periods = [target_period - (LOOKBACK-j) for j in range(LOOKBACK)]
+        seq = [[y_scaled[j], *month_features(recent_periods[j]), h_scaled[j]] for j in range(LOOKBACK)]
+        scaled_pred = float(model.predict(np.asarray(seq).reshape(1, LOOKBACK, 4), verbose=0)[0][0])
+        pred = max(0.0, float(y_scaler.inverse_transform([[scaled_pred]])[0][0]))
+        preds.append(pred)
+        values.append(pred)
+        hours.append(float(fh))
+    return np.asarray(preds)
 
-    if not mask.any():
-        return np.nan, np.nan, np.nan
 
-    a, p = a[mask], p[mask]
-    mae = mean_absolute_error(a, p)
-    rmse = np.sqrt(mean_squared_error(a, p))
+def predict_xgb(model, values, hours, periods, future_hours):
+    vals = list(map(float, values))
+    hrs = list(map(float, hours))
+    preds = []
+    for step, fh in enumerate(future_hours):
+        target_period = periods[-1] + (step + 1)
+        hist_vals = np.asarray(vals[-LOOKBACK:], dtype=float)
+        hist_hours = np.asarray(hrs[-LOOKBACK:], dtype=float)
+        hist_hours = np.nan_to_num(hist_hours, nan=float(np.nanmean(hrs)) if np.isfinite(hrs).any() else 0.0)
+        f = list(hist_vals[::-1]) + [float(hist_vals[-3:].mean()), float(hist_vals[-6:].mean()), float(hist_vals.mean()), *month_features(target_period), float(fh), float(hist_hours[-1]), float(hist_hours[-3:].mean()), float(hist_hours[-6:].mean()), float(hist_hours.mean())]
+        pred = max(0.0, float(model.predict(np.asarray([f], dtype=float))[0]))
+        preds.append(pred)
+        vals.append(pred)
+        hrs.append(float(fh))
+    return np.asarray(preds)
 
-    nonzero = a != 0
-    mape = (
-        np.mean(np.abs((a[nonzero] - p[nonzero]) / a[nonzero])) * 100
-        if np.any(nonzero) else np.nan
-    )
+
+def metrics(actual, predicted):
+    actual = np.asarray(actual, dtype=float)
+    predicted = np.asarray(predicted, dtype=float)
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    nz = actual != 0
+    mape = float(np.mean(np.abs((actual[nz]-predicted[nz])/actual[nz]))*100) if nz.any() else np.nan
     return mae, rmse, mape
 
 
-def metrics_table(actual, preds):
-    cols = {name: list(calculate_metrics(actual, p))
-            for name, p in preds.items()}
-    return pd.DataFrame({
-        "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
-        **cols
-    })
-
-
-# =====================================================================
-# DATA PREPARATION
-# =====================================================================
-raw_df = None
-data = None
-holdout_2026 = pd.DataFrame(columns=["_Date", "_Consumption"])
-dates = []
-y = np.array([])
-invalid_count = 0
-missing_months = []
-data_error = None
-lookup = {}
-
-if uploaded_file is not None:
-    try:
-        if uploaded_file.name.lower().endswith(".csv"):
-            raw_df = pd.read_csv(uploaded_file)
-        else:
-            raw_df = pd.read_excel(uploaded_file)
-
-        raw_df.columns = [str(c).strip() for c in raw_df.columns]
-
-        if raw_df.empty:
-            raise ValueError("The uploaded file is empty.")
-
-        cols = list(raw_df.columns)
-        lower = {c: c.lower().strip() for c in cols}
-
-        date_candidates = [
-            c for c in cols
-            if lower[c] in ["date", "month_date", "billing_date", "period"]
-        ]
-        year_candidates = [c for c in cols if lower[c] == "year"]
-        month_candidates = [c for c in cols if lower[c] == "month"]
-
-        # FIX: Year AND Month are no longer offered as "consumption" columns
-        numeric_candidates = [
-            c for c in cols
-            if pd.api.types.is_numeric_dtype(raw_df[c])
-            and c not in year_candidates
-            and c not in month_candidates
-        ]
-
-        preferred = [
-            c for c in numeric_candidates
-            if any(word in c.lower() for word in ["consumption", "kwh", "load"])
-        ]
-
-        with st.sidebar:
-            st.markdown("**COLUMN MAPPING**")
-
-            if date_candidates:
-                date_mode = st.radio(
-                    "Date format",
-                    ["Date column", "Year + month"],
-                    index=0 if not (year_candidates and month_candidates) else 1,
-                    key="date_mode"
-                )
-            else:
-                date_mode = st.radio(
-                    "Date format",
-                    ["Year + month", "Date column"],
-                    index=0,
-                    key="date_mode"
-                )
-
-            if date_mode == "Date column":
-                date_col = st.selectbox(
-                    "Date column",
-                    cols,
-                    index=cols.index(date_candidates[0]) if date_candidates else 0,
-                    key="date_col"
-                )
-                year_col = None
-                month_col = None
-            else:
-                year_col = st.selectbox(
-                    "Year column",
-                    cols,
-                    index=cols.index(year_candidates[0]) if year_candidates else 0,
-                    key="year_col"
-                )
-                month_col = st.selectbox(
-                    "Month column",
-                    cols,
-                    index=cols.index(month_candidates[0])
-                    if month_candidates else min(1, len(cols) - 1),
-                    key="month_col"
-                )
-                date_col = None
-
-            if not numeric_candidates:
-                raise ValueError("No numeric consumption column was detected.")
-
-            consume_default = (
-                numeric_candidates.index(preferred[0]) if preferred else 0
-            )
-
-            consumption_col = st.selectbox(
-                "Consumption (kWh)",
-                numeric_candidates,
-                index=consume_default,
-                key="consumption_col"
-            )
-
-        data = raw_df.copy()
-
-        if date_mode == "Date column":
-            data["_Date"] = pd.to_datetime(
-                data[date_col], errors="coerce"
-            ).dt.to_period("M")
-
-        else:
-            month_names = {
-                "jan": 1, "january": 1,
-                "feb": 2, "february": 2,
-                "mar": 3, "march": 3,
-                "apr": 4, "april": 4,
-                "may": 5,
-                "jun": 6, "june": 6,
-                "jul": 7, "july": 7,
-                "aug": 8, "august": 8,
-                "sep": 9, "sept": 9, "september": 9,
-                "oct": 10, "october": 10,
-                "nov": 11, "november": 11,
-                "dec": 12, "december": 12
-            }
-
-            def convert_month(value):
-                if pd.isna(value):
-                    return np.nan
-
-                value_string = str(value).strip().lower()
-
-                if value_string in month_names:
-                    return month_names[value_string]
-
-                try:
-                    number = int(float(value_string))
-                    return number if 1 <= number <= 12 else np.nan
-                except (ValueError, TypeError):
-                    return np.nan
-
-            years = pd.to_numeric(data[year_col], errors="coerce")
-            months = data[month_col].apply(convert_month)
-
-            data["_Date"] = [
-                pd.Period(year=int(a), month=int(b), freq="M")
-                if pd.notna(a) and pd.notna(b) and 1 <= int(b) <= 12
-                else pd.NaT
-                for a, b in zip(years, months)
-            ]
-
-        data["_Consumption"] = pd.to_numeric(
-            data[consumption_col], errors="coerce"
-        )
-
-        invalid_count = int(
-            data["_Date"].isna().sum()
-            + data["_Consumption"].isna().sum()
-        )
-
-        agg_func = "sum" if dup_mode == "Sum" else "mean"
-
-        data = (
-            data.dropna(subset=["_Date", "_Consumption"])
-            .sort_values("_Date")
-            .groupby("_Date", as_index=False)
-            .agg({"_Consumption": agg_func})
-        )
-
-        # 2026+ actuals are kept OUT of training and used for validation.
-        holdout_2026 = data[
-            data["_Date"].apply(lambda p: p.year >= 2026)
-        ].copy()
-
-        n_2026 = len(holdout_2026)
-        n_pandemic = int(data["_Date"].apply(
-            lambda p: p.year in (2020, 2021)
-        ).sum()) if exclude_pandemic else 0
-
-        data = data[
-            ~data["_Date"].apply(
-                lambda p: p.year >= 2026
-                or (exclude_pandemic and p.year in (2020, 2021))
-            )
-        ].copy()
-
-        if data.empty:
-            raise ValueError("No valid date and consumption rows were found.")
-
-        if (data["_Consumption"] < 0).any():
-            raise ValueError(
-                "Negative consumption values were found. "
-                "Please verify the source data."
-            )
-
-        dates = data["_Date"].tolist()
-        y = data["_Consumption"].astype(float).to_numpy()
-        lookup = dict(zip(dates, y))
-
-        parts = []
-        if n_pandemic:
-            parts.append(f"{n_pandemic} pandemic-period month(s) (2020–2021) excluded from training")
-        if n_2026:
-            parts.append(f"{n_2026} month(s) from 2026 onward held out for validation")
-        if parts:
-            st.info("; ".join(parts) + ".")
-
-        missing_months = [
-            f"{a + 1} to {b - 1}"
-            for a, b in zip(dates[:-1], dates[1:])
-            if b.ordinal - a.ordinal > 1
-        ]
-
-        if len(y) < 24:
-            raise ValueError(
-                "At least 24 valid monthly observations are recommended."
-            )
-
-        if not np.isfinite(y).all():
-            raise ValueError("Consumption contains invalid numeric values.")
-
-        # Clear old results when the data or options change
-        sig = (uploaded_file.name, len(y), str(dates[0]), str(dates[-1]),
-               float(np.sum(y)), exclude_pandemic, dup_mode)
-        if st.session_state.get("data_sig") != sig:
-            for k in ["metrics_rec", "metrics_one", "evaluation_df",
-                      "forecast_df", "val_df", "metrics_val",
-                      "horizon", "evaluation_horizon", "rolling"]:
-                st.session_state.pop(k, None)
-            st.session_state["data_sig"] = sig
-
-    except Exception as error:
-        data_error = str(error)
-
-
-def seasonal_naive(periods):
-    """Same month last year (NaN when that month isn't in training data)."""
-    return np.asarray([lookup.get(p - 12, np.nan) for p in periods], dtype=float)
-
-
-def onestep_last12(values, idxs):
-    """Average of the previous 12 ACTUAL months, for each target index."""
-    return np.asarray(
-        [float(np.mean(values[i - LOOKBACK:i])) for i in idxs], dtype=float
-    )
-
-
-def new_xgb():
-    return XGBRegressor(
-        n_estimators=300,
-        max_depth=3,
-        learning_rate=0.03,
-        subsample=0.9,
-        objective="reg:squarederror",
-        random_state=42,
-        n_jobs=1
-    )
-
-
-def rolling_candidate_years():
-    """Years that have all 12 months AND all 12 months of the year before
-    (needed as the lookback history for the first forecast month)."""
-    pset = set(dates)
-    out = []
-    for yr in sorted({d.year for d in dates}):
-        cur = [pd.Period(f"{yr}-{m:02d}", "M") for m in range(1, 13)]
-        if all(p in pset for p in cur) and all((p - 12) in pset for p in cur):
-            out.append(yr)
-    return out
-
-
-def run_rolling(test_years, progress=None, status=None):
-    """For each test year: train ONLY on months before that year, then
-    forecast the whole year. 2026+ is never part of `dates`."""
-    rows, details, counts, skipped = [], {}, {}, []
-
-    for k, yr in enumerate(test_years):
-        if status is not None:
-            status.info(
-                f"Round {k + 1} of {len(test_years)}: training on data "
-                f"before {yr}…"
-            )
-
-        tr_idx = [i for i, d in enumerate(dates) if d.year < yr]
-        te_idx = [i for i, d in enumerate(dates) if d.year == yr]
-        tr_dates = [dates[i] for i in tr_idx]
-        tr_y = y[tr_idx]
-        te_dates = [dates[i] for i in te_idx]
-        actual = y[te_idx]
-
-        try:
-            Xtr, ytr = make_xgb_training_data(tr_y, tr_dates)
-            if len(Xtr) < 12:
-                raise ValueError(f"only {len(Xtr)} training sequences")
-            xgb_m = new_xgb()
-            xgb_m.fit(Xtr, ytr)
-            lstm_m = train_lstm(tr_y, tr_dates)
-        except Exception as error:
-            skipped.append(f"{yr}: {error}")
-            continue
-
-        hist = [lookup[te_dates[0] - 12 + j] for j in range(LOOKBACK)]
-        n = len(te_idx)
-
-        xgb_rec = recursive_xgb_forecast(xgb_m, hist, te_dates[0], n)
-        lstm_rec = recursive_lstm_forecast(lstm_m, hist, te_dates[0] - 1, n)
-        xgb_one = onestep_xgb(xgb_m, y, dates, te_idx)
-        lstm_one = onestep_lstm(lstm_m, y, dates, te_idx)
-        naive = seasonal_naive(te_dates)
-        last_multi = np.full(n, float(np.mean(hist)))
-        last_one = onestep_last12(y, te_idx)
-
-        multi = {"LSTM": lstm_rec, "XGBoost": xgb_rec,
-                 "Seasonal Naive": naive, "Last-12 Avg": last_multi}
-        onest = {"LSTM": lstm_one, "XGBoost": xgb_one,
-                 "Seasonal Naive": naive, "Last-12 Avg": last_one}
-
-        for mode, preds in [("Multi-step", multi), ("One-step", onest)]:
-            for model_name, p in preds.items():
-                mae, rmse, mape = calculate_metrics(actual, p)
-                rows.append(dict(Year=yr, Mode=mode, Model=model_name,
-                                 MAE=mae, RMSE=rmse, MAPE=mape))
-
-        details[yr] = pd.DataFrame({
-            "Month": [str(d) for d in te_dates],
-            "Actual (kWh)": actual,
-            "LSTM multi-step": lstm_rec,
-            "XGBoost multi-step": xgb_rec,
-            "LSTM one-step": lstm_one,
-            "XGBoost one-step": xgb_one,
-            "Seasonal Naive": naive,
-            "Last-12 Avg multi-step": last_multi,
-            "Last-12 Avg one-step": last_one
-        })
-        counts[yr] = len(Xtr)
-
-        if progress is not None:
-            progress.progress(int((k + 1) / len(test_years) * 100))
-
-    return pd.DataFrame(rows), details, counts, skipped
-
-
-# =====================================================================
-# PAGE HELPERS
-# =====================================================================
-def page_header(kicker, title, subtitle):
-    st.markdown(
-        f'<div class="eyebrow">{kicker}</div>'
-        f'<h1 class="page-title">{title}</h1>'
-        f'<div class="page-subtitle">{subtitle}</div>',
-        unsafe_allow_html=True
-    )
-
-
-def chart_style(fig, height=390):
-    fig.update_layout(
-        template="plotly_white",
-        height=height,
-        margin=dict(l=12, r=12, t=40, b=12),
-        paper_bgcolor="rgba(255,255,255,0)",
-        plot_bgcolor="#ffffff",
-        font=dict(family="DM Sans, sans-serif", color="#52647a"),
-        hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(gridcolor="#edf1f5", zeroline=False)
-    )
-    return fig
-
-
-def verdict(metrics_df):
-    cols = [c for c in metrics_df.columns if c != "Metric"]
-    mape = metrics_df.loc[metrics_df["Metric"] == "MAPE (%)", cols].iloc[0]
-    mape = pd.to_numeric(mape, errors="coerce").dropna()
-
-    if mape.empty:
-        st.info("MAPE is not available for this period.")
+def get_history(df):
+    return df["Consumption_kWh"].to_numpy(dtype=float), df["Operating_Hours"].to_numpy(dtype=float), df["Period"].tolist()
+
+
+def future_hours_inputs(last_period, horizon, default_hours):
+    st.markdown("### Expected operating hours")
+    st.caption("Enter the planned operating hours for each forecast month. These values are used by both LSTM and XGBoost.")
+    cols = st.columns(3)
+    hours = []
+    for i in range(horizon):
+        p = last_period + (i+1)
+        with cols[i % 3]:
+            value = st.number_input(f"{MONTH_NAMES[p.month]} {p.year}", min_value=0.0, max_value=744.0, value=float(default_hours), step=12.0, key=f"future_hours_{p.year}_{p.month}")
+            hours.append(value)
+    return hours
+
+
+def model_comparison(df):
+    values, hours, periods = get_history(df)
+    # Use last 12 months as holdout when available; models only train on earlier data.
+    test_size = 12
+    split = len(df) - test_size
+    train_df = df.iloc[:split].copy()
+    test_df = df.iloc[split:].copy()
+    if len(train_df) < 24 or len(test_df) < 1:
+        st.error("Not enough data for a holdout comparison. Please upload at least 25 monthly records.")
         return
-
-    best = mape.idxmin()
-    base_txt = ", ".join(
-        f"{b}: {mape[b]:.2f}%" for b in BASELINES if b in mape.index
-    )
-
-    if best in BASELINES:
-        st.warning(
-            f"The {best} baseline has the lowest MAPE ({mape[best]:.2f}%). "
-            "The ML models do not beat it on this period. "
-            f"(Baselines: {base_txt})"
-        )
-    else:
-        st.success(
-            f"{best} has the lowest MAPE ({mape[best]:.2f}%). "
-            f"Baselines: {base_txt}."
-        )
-
-
-def render_block(note, metrics_df, detail_df, series_cols, key):
-    st.markdown(f'<div class="section-copy">{note}</div>',
-                unsafe_allow_html=True)
-
-    st.dataframe(metrics_df.round(3), use_container_width=True, hide_index=True)
-    verdict(metrics_df)
-
-    fig = go.Figure()
-    for name in metrics_df.columns[1:]:
-        fig.add_trace(go.Bar(
-            name=name,
-            x=metrics_df["Metric"],
-            y=metrics_df[name],
-            marker_color=COLORS.get(name)
-        ))
-    fig.update_layout(title="Error metrics by model", barmode="group",
-                      yaxis_title="Metric value")
-    st.plotly_chart(chart_style(fig), use_container_width=True, key=f"bar_{key}")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=detail_df["Month"], y=detail_df["Actual (kWh)"],
-        mode="lines+markers", name="Actual",
-        line=dict(color="#142b4a", width=3)
-    ))
-    for name, col in series_cols.items():
-        fig.add_trace(go.Scatter(
-            x=detail_df["Month"], y=detail_df[col],
-            mode="lines+markers", name=name,
-            line=dict(color=COLORS.get(name), width=2,
-                      dash="dot" if name in BASELINES else "solid")
-        ))
-    fig.update_layout(title="Actual vs predicted",
-                      yaxis_title="Consumption (kWh)")
-    st.plotly_chart(chart_style(fig, 430), use_container_width=True,
-                    key=f"line_{key}")
-
-    st.dataframe(detail_df.round(2), use_container_width=True, hide_index=True)
+    tr_y, tr_h, tr_p = get_history(train_df)
+    te_y, te_h, te_p = get_history(test_df)
+    if not all(te_p[i].ordinal-te_p[i-1].ordinal == 1 for i in range(1,len(te_p))):
+        st.warning("The last test period has missing months. Metrics may not represent a complete year.")
+    try:
+        with st.spinner("Training and comparing LSTM and XGBoost..."):
+            xgb = train_xgb(tr_y, tr_h, tr_p)
+            lstm, ys, hs = train_lstm(tr_y, tr_h, tr_p)
+            # Forecast test period recursively; use known actual operating hours for those test months.
+            pred_xgb = predict_xgb(xgb, tr_y, tr_h, tr_p, te_h)
+            pred_lstm = predict_lstm(lstm, ys, hs, tr_y, tr_h, tr_p, te_h)
+        rows=[]
+        for name, pred in [("LSTM", pred_lstm), ("XGBoost", pred_xgb)]:
+            mae, rmse, mape = metrics(te_y, pred)
+            rows.append({"Model":name, "MAE (kWh)":mae, "RMSE (kWh)":rmse, "MAPE (%)":mape})
+        result = pd.DataFrame(rows)
+        st.caption(f"Evaluation: {te_p[0]} to {te_p[-1]}. The models were trained only on earlier months; test-period operating hours are used as known inputs.")
+        st.dataframe(result.round(2), use_container_width=True, hide_index=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=[str(p) for p in te_p], y=te_y, mode="lines+markers", name="Actual"))
+        fig.add_trace(go.Scatter(x=[str(p) for p in te_p], y=pred_lstm, mode="lines+markers", name="LSTM"))
+        fig.add_trace(go.Scatter(x=[str(p) for p in te_p], y=pred_xgb, mode="lines+markers", name="XGBoost"))
+        fig.update_layout(title="Actual vs Predicted Consumption", xaxis_title="Month", yaxis_title="Consumption (kWh)", height=420, template="plotly_white", legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig, use_container_width=True)
+        st.download_button("Download metrics (CSV)", result.to_csv(index=False).encode("utf-8"), "model_metrics.csv", "text/csv")
+    except Exception as e:
+        st.error(f"Could not compare the models: {e}")
 
 
-# =====================================================================
-# HOME PAGE
-# =====================================================================
+# Main UI
 if page == "Home":
-    st.markdown(
-        '<div class="hero">'
-        '<div class="hero-label">Monthly energy intelligence · Research workspace</div>'
-        '<div class="hero-title">Understand your consumption.<br>'
-        'Forecast what comes next.</div>'
-        '<div class="hero-copy">A research-focused workspace for exploring '
-        'monthly electricity use and evaluating LSTM against XGBoost. Start '
-        'with your historical data, then train both models and compare their results.</div>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    page_header(
-        "OVERVIEW / HOME",
-        "Your forecasting workspace",
-        "Upload your monthly consumption data in the sidebar to start. "
-        "Your analysis stays organized across four simple sections."
-    )
-
-    if uploaded_file is None:
-        left, right = st.columns([1.3, 1], gap="large")
-
-        with left:
-            st.markdown(
-                '<div class="section-heading">Get started in three steps</div>'
-                '<div class="section-copy">No special template required. '
-                'Map your columns after uploading a CSV or Excel workbook.</div>',
-                unsafe_allow_html=True
-            )
-
-            steps = [
-                ("01", "Upload your data",
-                 "Use monthly readings with a date or separate year and month columns."),
-                ("02", "Train the models",
-                 "Run LSTM and XGBoost on the same historical dataset."),
-                ("03", "Compare and export",
-                 "Review MAE, RMSE, MAPE, charts, and downloadable results.")
-            ]
-
-            for number, title, description in steps:
-                with st.container(border=True):
-                    c1, c2 = st.columns([0.18, 0.82])
-                    c1.markdown(
-                        f'<div class="brand-icon">{number}</div>',
-                        unsafe_allow_html=True
-                    )
-                    c2.markdown(
-                        f"**{title}**  \n"
-                        f"<span style='color:#708096;font-size:.9rem'>"
-                        f"{description}</span>",
-                        unsafe_allow_html=True
-                    )
-
-        with right:
-            st.markdown(
-                '<div class="section-heading">Dataset checklist</div>'
-                '<div class="section-copy">For best results, prepare a clean monthly timeline.</div>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                "- One row per month\n"
-                "- Consumption measured consistently in kWh\n"
-                "- At least 24 monthly observations\n"
-                "- Check for missing months and unusual values"
-            )
-            st.info("Example fields: `Year`, `Month`, `Consumption_kWh`.")
-
-    elif data_error:
-        st.error(f"The file could not be prepared: {data_error}")
-
+    st.markdown('<div class="hero"><h1>Monthly Electricity Load Forecasting</h1><div>Compare LSTM and XGBoost using monthly consumption and operating hours.</div></div>', unsafe_allow_html=True)
+    st.write("Upload your monthly dataset, forecast future electricity consumption, and compare model accuracy using only MAE, RMSE, and MAPE.")
+    st.markdown("**Required columns**")
+    st.code("Year, Month, Consumption_kWh, Operating_Hours", language="text")
+    st.caption("Use one row per month. Pandemic years 2020–2021 and records from 2026 onward are excluded from training.")
+    if uploaded_file is not None:
+        try:
+            df, has_hours = prepare_data(uploaded_file)
+            st.success(f"Loaded {len(df)} monthly records.")
+            a,b,c = st.columns(3)
+            a.metric("Monthly records", len(df))
+            a2 = int(df["Period"].iloc[0].year); b2 = int(df["Period"].iloc[-1].year)
+            b.metric("Data range", f"{a2}–{b2}")
+            c.metric("Operating hours", "Available" if has_hours else "Missing")
+            st.dataframe(pd.DataFrame({"Year":[p.year for p in df.Period],"Month":[MONTH_NAMES[p.month] for p in df.Period],"Consumption_kWh":df.Consumption_kWh,"Operating_Hours":df.Operating_Hours}), use_container_width=True, hide_index=True)
+            if not has_hours:
+                st.warning("No Operating_Hours column was found. Add it to your file to use operating hours as model inputs.")
+        except Exception as e:
+            st.error(str(e))
     else:
-        c1, c2, c3, c4 = st.columns(4)
+        st.info("Upload your CSV or Excel file in the sidebar to begin.")
 
-        c1.metric("Monthly records", f"{len(y):,}")
-        c2.metric("Average use", f"{np.mean(y):,.0f} kWh")
-        c3.metric("Latest reading", f"{y[-1]:,.0f} kWh")
-        c4.metric("Coverage", f"{dates[0]} – {dates[-1]}")
-
-        st.markdown(
-            '<div class="section-heading">Consumption at a glance</div>'
-            '<div class="section-copy">A quick view of the monthly history in the uploaded file.</div>',
-            unsafe_allow_html=True
-        )
-
-        fig = go.Figure(
-            go.Scatter(
-                x=[d.to_timestamp() for d in dates],
-                y=y,
-                mode="lines+markers",
-                name="Training data",
-                line=dict(color="#0e9384", width=3),
-                marker=dict(size=5),
-                fill="tozeroy",
-                fillcolor="rgba(14,147,132,.08)"
-            )
-        )
-
-        if len(holdout_2026) > 0:
-            fig.add_trace(go.Scatter(
-                x=[d.to_timestamp() for d in holdout_2026["_Date"]],
-                y=holdout_2026["_Consumption"],
-                mode="lines+markers",
-                name="2026 actual (validation only)",
-                line=dict(color="#e08a1e", width=3)
-            ))
-
-        fig.update_layout(
-            title="Historical monthly consumption",
-            xaxis_title="Month",
-            yaxis_title="Consumption (kWh)"
-        )
-
-        st.plotly_chart(chart_style(fig, 400), use_container_width=True)
-
-        if missing_months:
-            st.warning(
-                f"Timeline gaps detected: {len(missing_months)}. "
-                "Model training excludes sequences that cross missing-month gaps."
-            )
-
-        if invalid_count:
-            st.info(
-                f"{invalid_count} invalid date/value entries were excluded. "
-                "Check the source workbook to confirm."
-            )
-
-        with st.expander("Preview uploaded records"):
-            preview = data.rename(
-                columns={
-                    "_Date": "Month",
-                    "_Consumption": "Consumption (kWh)"
-                }
-            )[["Month", "Consumption (kWh)"]].head(15)
-
-            preview["Month"] = preview["Month"].astype(str)
-
-            st.dataframe(
-                preview,
-                use_container_width=True,
-                hide_index=True
-            )
-
-# =====================================================================
-# FORECAST PAGE
-# =====================================================================
 elif page == "Forecast":
-    page_header(
-        "WORKSPACE / FORECAST",
-        "Generate a monthly forecast",
-        "Choose a forecast horizon, train both models, and generate future "
-        "consumption estimates from your uploaded history."
-    )
-
+    st.title("Forecast Future Consumption")
     if uploaded_file is None:
-        st.info("Upload a CSV or Excel file from the sidebar first.")
-
-    elif data_error:
-        st.error(f"The uploaded data needs attention: {data_error}")
-
+        st.info("Upload your historical monthly dataset in the sidebar first.")
     else:
-        if len(holdout_2026) > 0:
-            n_needed = max(
-                1, holdout_2026["_Date"].max().ordinal - dates[-1].ordinal
-            )
-        else:
-            n_needed = 12
-        default_h = int(min(24, n_needed))
-
-        left, right = st.columns([1.25, 0.75], gap="large")
-
-        with left:
-            st.markdown(
-                '<div class="section-heading">Forecast setup</div>'
-                '<div class="section-copy">The models use the latest 12 '
-                'consecutive months as their lookback window.</div>',
-                unsafe_allow_html=True
-            )
-
-            horizon = st.selectbox(
-                "Forecast horizon",
-                options=list(range(1, 25)),
-                index=default_h - 1,
-                format_func=lambda x: f"{x} month(s)",
-                key="horizon_select"
-            )
-
-            st.caption(
-                f"Forecast output: {horizon} future month(s) after {dates[-1]}."
-            )
-
-            if len(holdout_2026) > 0:
-                st.caption(
-                    f"2026 actuals available through "
-                    f"{holdout_2026['_Date'].max()}. Use a horizon of at least "
-                    f"{n_needed} to validate against all of them."
-                )
-
-        with right:
-            st.markdown(
-                '<div class="section-heading">Data readiness</div>',
-                unsafe_allow_html=True
-            )
-            st.metric("Valid monthly records", f"{len(y)}")
-            st.metric("Latest available month", str(dates[-1]))
-            st.metric("Missing timeline gaps", str(len(missing_months)))
-
-        if st.button(
-            "Train models & generate forecast",
-            type="primary",
-            use_container_width=True
-        ):
-            progress = st.progress(0)
-            status = st.empty()
-
-            try:
-                latest_len = latest_contiguous_segment_length(dates)
-
-                if latest_len <= LOOKBACK:
-                    raise ValueError(
-                        "Not enough consecutive monthly records at the end of "
-                        "the data. At least 13 consecutive months are needed."
-                    )
-
-                eval_h = min(12, max(1, latest_len - LOOKBACK))
-                split = len(y) - eval_h
-
-                train_y = y[:split]
-                train_dates = dates[:split]
-
-                status.info("Preparing training and evaluation data…")
-                progress.progress(10)
-
-                Xtr, ytr = make_xgb_training_data(train_y, train_dates)
-
-                if len(Xtr) < 5:
-                    raise ValueError(
-                        "Not enough valid XGBoost training sequences after "
-                        "excluding timeline gaps."
-                    )
-
-                status.info("Training XGBoost…")
-                progress.progress(25)
-
-                def new_xgb():
-                    return XGBRegressor(
-                        n_estimators=300,
-                        max_depth=3,
-                        learning_rate=0.03,
-                        subsample=0.9,
-                        objective="reg:squarederror",
-                        random_state=42,
-                        n_jobs=1
-                    )
-
-                xgb = new_xgb()
-                xgb.fit(Xtr, ytr)
-
-                status.info("Training LSTM…")
-                progress.progress(45)
-
-                lstm = train_lstm(train_y, train_dates)
-
-                status.info("Evaluating models on held-out months…")
-                progress.progress(65)
-
-                eval_dates = dates[split:]
-                actual = y[split:]
-                idxs = list(range(split, len(y)))
-
-                # Multi-step (recursive) holdout
-                xgb_rec = recursive_xgb_forecast(
-                    xgb, train_y[-LOOKBACK:], eval_dates[0], eval_h
-                )
-                lstm_rec = recursive_lstm_forecast(
-                    lstm, train_y[-LOOKBACK:], eval_dates[0] - 1, eval_h
-                )
-
-                # One-step-ahead holdout (uses actual history each step)
-                xgb_one = onestep_xgb(xgb, y, dates, idxs)
-                lstm_one = onestep_lstm(lstm, y, dates, idxs)
-
-                naive_eval = seasonal_naive(eval_dates)
-                last12_multi = np.full(
-                    eval_h, float(np.mean(train_y[-LOOKBACK:]))
-                )
-                last12_one = onestep_last12(y, idxs)
-
-                metrics_rec = metrics_table(actual, {
-                    "LSTM": lstm_rec,
-                    "XGBoost": xgb_rec,
-                    "Seasonal Naive": naive_eval,
-                    "Last-12 Avg": last12_multi
-                })
-                metrics_one = metrics_table(actual, {
-                    "LSTM": lstm_one,
-                    "XGBoost": xgb_one,
-                    "Seasonal Naive": naive_eval,
-                    "Last-12 Avg": last12_one
-                })
-
-                evaluation = pd.DataFrame({
-                    "Month": [str(d) for d in eval_dates],
-                    "Actual (kWh)": actual,
-                    "LSTM multi-step": lstm_rec,
-                    "XGBoost multi-step": xgb_rec,
-                    "LSTM one-step": lstm_one,
-                    "XGBoost one-step": xgb_one,
-                    "Seasonal Naive": naive_eval,
-                    "Last-12 Avg multi-step": last12_multi,
-                    "Last-12 Avg one-step": last12_one
-                })
-
-                status.info(
-                    "Retraining with all records and forecasting future months…"
-                )
-                progress.progress(80)
-
-                all_X, all_y = make_xgb_training_data(y, dates)
-
-                if len(all_X) < 5:
-                    raise ValueError(
-                        "Not enough valid XGBoost training sequences in the full dataset."
-                    )
-
-                final_xgb = new_xgb()
-                final_xgb.fit(all_X, all_y)
-
-                final_lstm = train_lstm(y, dates)
-
-                future_periods = [
-                    dates[-1] + i for i in range(1, horizon + 1)
-                ]
-
-                history = y[-LOOKBACK:]
-
-                xf = recursive_xgb_forecast(
-                    final_xgb, history, future_periods[0], horizon
-                )
-                lf = recursive_lstm_forecast(
-                    final_lstm, history, dates[-1], horizon
-                )
-                nf = seasonal_naive(future_periods)
-                af = np.full(horizon, float(np.mean(history)))
-
-                forecast = pd.DataFrame({
-                    "Month": [str(p) for p in future_periods],
-                    "LSTM Forecast (kWh)": lf,
-                    "XGBoost Forecast (kWh)": xf,
-                    "Seasonal Naive (kWh)": nf,
-                    "Last-12 Avg (kWh)": af
-                })
-
-                # 2026 validation against actuals the models never saw
-                val_df = None
-                metrics_val = None
-                if len(holdout_2026) > 0:
-                    act = pd.DataFrame({
-                        "Month": [str(p) for p in holdout_2026["_Date"]],
-                        "Actual (kWh)": holdout_2026["_Consumption"].to_numpy()
-                    })
-                    val_df = act.merge(forecast, on="Month", how="inner")
-                    if len(val_df) > 0:
-                        metrics_val = metrics_table(val_df["Actual (kWh)"], {
-                            "LSTM": val_df["LSTM Forecast (kWh)"],
-                            "XGBoost": val_df["XGBoost Forecast (kWh)"],
-                            "Seasonal Naive": val_df["Seasonal Naive (kWh)"],
-                            "Last-12 Avg": val_df["Last-12 Avg (kWh)"]
-                        })
-                    else:
-                        val_df = None
-
-                st.session_state["metrics_rec"] = metrics_rec
-                st.session_state["metrics_one"] = metrics_one
-                st.session_state["evaluation_df"] = evaluation
-                st.session_state["forecast_df"] = forecast
-                st.session_state["val_df"] = val_df
-                st.session_state["metrics_val"] = metrics_val
-                st.session_state["horizon"] = horizon
-                st.session_state["evaluation_horizon"] = eval_h
-
-                progress.progress(100)
-                status.success(
-                    "Training and forecasting completed. Open Model Comparison "
-                    "to review evaluation results."
-                )
-
-            except Exception as error:
-                status.error("The training process could not be completed.")
-                st.error(str(error))
-
-        if "forecast_df" in st.session_state:
-            st.markdown(
-                '<div class="section-heading">Latest forecast</div>'
-                '<div class="section-copy">Forecasts are estimates generated '
-                'from the uploaded historical records.</div>',
-                unsafe_allow_html=True
-            )
-
-            forecast_df = st.session_state["forecast_df"]
-
-            a, b = st.columns(2)
-            a.metric(
-                "LSTM next-month estimate",
-                f"{forecast_df.iloc[0, 1]:,.0f} kWh"
-            )
-            b.metric(
-                "XGBoost next-month estimate",
-                f"{forecast_df.iloc[0, 2]:,.0f} kWh"
-            )
-
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatter(
-                x=forecast_df["Month"],
-                y=forecast_df["LSTM Forecast (kWh)"],
-                mode="lines+markers",
-                name="LSTM",
-                line=dict(color=COLORS["LSTM"], width=3)
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=forecast_df["Month"],
-                y=forecast_df["XGBoost Forecast (kWh)"],
-                mode="lines+markers",
-                name="XGBoost",
-                line=dict(color=COLORS["XGBoost"], width=3)
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=forecast_df["Month"],
-                y=forecast_df["Seasonal Naive (kWh)"],
-                mode="lines",
-                name="Seasonal Naive",
-                line=dict(color=COLORS["Seasonal Naive"], width=2, dash="dot")
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=forecast_df["Month"],
-                y=forecast_df["Last-12 Avg (kWh)"],
-                mode="lines",
-                name="Last-12 Avg",
-                line=dict(color=COLORS["Last-12 Avg"], width=2, dash="dot")
-            ))
-
-            if len(holdout_2026) > 0:
-                fig.add_trace(go.Scatter(
-                    x=[str(p) for p in holdout_2026["_Date"]],
-                    y=holdout_2026["_Consumption"],
-                    mode="lines+markers",
-                    name="2026 actual",
-                    line=dict(color="#142b4a", width=3)
-                ))
-
-            fig.update_layout(
-                title="Forecast by model",
-                xaxis_title="Future month",
-                yaxis_title="Forecast consumption (kWh)"
-            )
-
-            st.plotly_chart(chart_style(fig), use_container_width=True)
-            st.dataframe(
-                forecast_df.round(2),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            st.download_button(
-                "Download forecast CSV",
-                forecast_df.to_csv(index=False).encode("utf-8"),
-                "monthly_load_forecast.csv",
-                "text/csv",
-                use_container_width=True
-            )
-
-# =====================================================================
-# ROLLING TEST PAGE
-# =====================================================================
-elif page == "Rolling Test":
-    page_header(
-        "WORKSPACE / ROLLING TEST",
-        "Test the models across several years",
-        "Each round trains only on the months before a test year, then "
-        "forecasts that whole year. Repeating this over several years gives "
-        "a fairer score than a single holdout. 2026 actuals are never used "
-        "here; they stay as a separate final check."
-    )
-
-    if uploaded_file is None:
-        st.info("Upload a CSV or Excel file from the sidebar first.")
-
-    elif data_error:
-        st.error(f"The uploaded data needs attention: {data_error}")
-
-    else:
-        candidates = rolling_candidate_years()
-
-        if not candidates:
-            st.warning(
-                "No test year is possible. A test year needs all 12 months "
-                "plus all 12 months of the year before it."
-            )
-        else:
-            sig_key = abs(hash(str(st.session_state.get("data_sig"))))
-            test_years = st.multiselect(
-                "Test years",
-                options=candidates,
-                default=candidates[-3:],
-                key=f"rolling_years_{sig_key}"
-            )
-            st.caption(
-                "Each round trains on every month BEFORE the test year. "
-                "It trains both models once per round, so it can take a few "
-                "minutes."
-            )
-
-            if st.button(
-                "Run rolling test",
-                type="primary",
-                use_container_width=True,
-                disabled=len(test_years) == 0
-            ):
-                progress = st.progress(0)
-                status = st.empty()
-                try:
-                    results, details, counts, skipped = run_rolling(
-                        sorted(test_years), progress, status
-                    )
-                    if results.empty:
-                        raise ValueError(
-                            "No round could be completed. "
-                            + "; ".join(skipped)
-                        )
-                    st.session_state["rolling"] = dict(
-                        results=results, details=details,
-                        counts=counts, skipped=skipped
-                    )
-                    progress.progress(100)
-                    status.success("Rolling test completed.")
-                except Exception as error:
-                    status.error("The rolling test could not be completed.")
-                    st.error(str(error))
-
-        if "rolling" in st.session_state:
-            R = st.session_state["rolling"]
-            results = R["results"]
-            details = R["details"]
-            counts = R["counts"]
-
-            if R["skipped"]:
-                st.warning("Skipped rounds: " + "; ".join(R["skipped"]))
-
-            order = ["LSTM", "XGBoost", "Seasonal Naive", "Last-12 Avg"]
-
-            mode = st.radio(
-                "Forecast mode",
-                ["Multi-step", "One-step"],
-                horizontal=True,
-                key="rolling_mode",
-                help="Multi-step: the model forecasts the whole year using "
-                     "only its own predictions. One-step: every month is "
-                     "predicted from the previous 12 actual months."
-            )
-
-            res = results[results["Mode"] == mode]
-            avg = (
-                res.groupby("Model")[["MAE", "RMSE", "MAPE"]]
-                .mean()
-                .reindex([m for m in order if m in set(res["Model"])])
-            )
-
-            st.markdown(
-                '<div class="section-heading">Average across all test years</div>'
-                '<div class="section-copy">Mean of the per-year scores. '
-                'Lower is better.</div>',
-                unsafe_allow_html=True
-            )
-
-            avg_show = avg.rename(columns={
-                "MAE": "MAE (kWh)", "RMSE": "RMSE (kWh)", "MAPE": "MAPE (%)"
-            })
-            st.dataframe(avg_show.round(2), use_container_width=True)
-
-            wide = pd.DataFrame({
-                "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
-                **{m: [avg.loc[m, "MAE"], avg.loc[m, "RMSE"],
-                       avg.loc[m, "MAPE"]] for m in avg.index}
-            })
-            verdict(wide)
-
-            st.markdown(
-                '<div class="section-heading">Score per test year</div>',
-                unsafe_allow_html=True
-            )
-
-            metric_pick = st.selectbox(
-                "Metric", ["MAPE", "MAE", "RMSE"], key="rolling_metric"
-            )
-
-            fig = go.Figure()
-            for m in order:
-                sub = res[res["Model"] == m].sort_values("Year")
-                if sub.empty:
-                    continue
-                fig.add_trace(go.Bar(
-                    name=m,
-                    x=[str(v) for v in sub["Year"]],
-                    y=sub[metric_pick],
-                    marker_color=COLORS.get(m)
-                ))
-            fig.update_layout(
-                title=f"{metric_pick} by test year ({mode.lower()})",
-                barmode="group",
-                xaxis_title="Test year",
-                yaxis_title=metric_pick + (" (%)" if metric_pick == "MAPE" else " (kWh)")
-            )
-            st.plotly_chart(chart_style(fig, 420), use_container_width=True,
-                            key="rolling_bar")
-
-            pivot = res.pivot(index="Year", columns="Model", values=metric_pick)
-            pivot = pivot[[m for m in order if m in pivot.columns]]
-            pivot.index = [str(v) for v in pivot.index]
-            st.dataframe(pivot.round(2), use_container_width=True)
-
-            st.caption(
-                "Training sequences per round: "
-                + ", ".join(f"{yr}: {n}" for yr, n in sorted(counts.items()))
-                + ". Fewer sequences usually means a weaker model."
-            )
-
-            st.markdown(
-                '<div class="section-heading">Actual vs predicted per round</div>',
-                unsafe_allow_html=True
-            )
-
-            tab_years = sorted(details.keys())
-            tabs = st.tabs([str(v) for v in tab_years])
-            suffix = "multi-step" if mode == "Multi-step" else "one-step"
-
-            for tab, yr in zip(tabs, tab_years):
-                with tab:
-                    d = details[yr]
+        try:
+            df, has_hours = prepare_data(uploaded_file)
+            if not has_hours or df["Operating_Hours"].isna().all():
+                st.warning("Operating hours are missing. Add an Operating_Hours column before forecasting with this version of the app.")
+            else:
+                st.caption(f"Training data: {df.Period.iloc[0]} to {df.Period.iloc[-1]}. Both models use historical consumption and operating hours.")
+                horizon = st.selectbox("Forecast horizon", [1,3,6,12], index=1, format_func=lambda n:f"{n} month(s)")
+                known_hours = df["Operating_Hours"].dropna()
+                default_hours = float(known_hours.iloc[-1]) if len(known_hours) else 480.0
+                future_hours = future_hours_inputs(df["Period"].iloc[-1], horizon, default_hours)
+                if st.button("Generate Forecast", type="primary", use_container_width=True):
+                    with st.spinner("Training LSTM and XGBoost and generating forecast..."):
+                        values, hours, periods = get_history(df)
+                        xgb = train_xgb(values, hours, periods)
+                        lstm, ys, hs = train_lstm(values, hours, periods)
+                        pred_xgb = predict_xgb(xgb, values, hours, periods, future_hours)
+                        pred_lstm = predict_lstm(lstm, ys, hs, values, hours, periods, future_hours)
+                    future_periods = [periods[-1]+(i+1) for i in range(horizon)]
+                    output = pd.DataFrame({"Year":[p.year for p in future_periods],"Month":[MONTH_NAMES[p.month] for p in future_periods],"Operating_Hours":future_hours,"LSTM_Forecast_kWh":np.round(pred_lstm,2),"XGBoost_Forecast_kWh":np.round(pred_xgb,2)})
+                    st.session_state["forecast_output"] = output
+                    st.session_state["forecast_periods"] = [str(p) for p in future_periods]
+                    st.session_state["forecast_lstm"] = pred_lstm
+                    st.session_state["forecast_xgb"] = pred_xgb
+                if "forecast_output" in st.session_state:
+                    output = st.session_state["forecast_output"]
+                    st.subheader("Forecast results")
+                    st.dataframe(output, use_container_width=True, hide_index=True)
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=d["Month"], y=d["Actual (kWh)"],
-                        mode="lines+markers", name="Actual",
-                        line=dict(color="#142b4a", width=3)
-                    ))
-                    series = {
-                        "LSTM": f"LSTM {suffix}",
-                        "XGBoost": f"XGBoost {suffix}",
-                        "Seasonal Naive": "Seasonal Naive",
-                        "Last-12 Avg": f"Last-12 Avg {suffix}"
-                    }
-                    for name, col in series.items():
-                        fig.add_trace(go.Scatter(
-                            x=d["Month"], y=d[col],
-                            mode="lines+markers", name=name,
-                            line=dict(
-                                color=COLORS.get(name), width=2,
-                                dash="dot" if name in BASELINES else "solid"
-                            )
-                        ))
-                    fig.update_layout(
-                        title=f"{yr}: actual vs predicted ({mode.lower()})",
-                        yaxis_title="Consumption (kWh)"
-                    )
-                    st.plotly_chart(chart_style(fig, 400),
-                                    use_container_width=True,
-                                    key=f"rolling_line_{yr}")
-                    st.dataframe(d.round(2), use_container_width=True,
-                                 hide_index=True)
+                    fig.add_trace(go.Scatter(x=output["Month"]+" "+output["Year"].astype(str), y=output["LSTM_Forecast_kWh"], mode="lines+markers", name="LSTM"))
+                    fig.add_trace(go.Scatter(x=output["Month"]+" "+output["Year"].astype(str), y=output["XGBoost_Forecast_kWh"], mode="lines+markers", name="XGBoost"))
+                    fig.update_layout(title="Forecasted Monthly Electricity Consumption", xaxis_title="Month", yaxis_title="Consumption (kWh)", height=400, template="plotly_white", legend=dict(orientation="h", y=1.12))
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.download_button("Download forecast (CSV)", output.to_csv(index=False).encode("utf-8"), "monthly_load_forecast.csv", "text/csv")
+        except Exception as e:
+            st.error(f"Could not prepare the data: {e}")
 
-            all_details = pd.concat(
-                [d.assign(Year=yr) for yr, d in details.items()],
-                ignore_index=True
-            )
-            e1, e2 = st.columns(2)
-            e1.download_button(
-                "Rolling scores CSV",
-                results.to_csv(index=False).encode("utf-8"),
-                "rolling_test_scores.csv",
-                "text/csv",
-                use_container_width=True
-            )
-            e2.download_button(
-                "Rolling predictions CSV",
-                all_details.to_csv(index=False).encode("utf-8"),
-                "rolling_test_predictions.csv",
-                "text/csv",
-                use_container_width=True
-            )
-
-# =====================================================================
-# MODEL COMPARISON PAGE
-# =====================================================================
 elif page == "Model Comparison":
-    page_header(
-        "WORKSPACE / EVALUATION",
-        "Compare model performance",
-        "Review LSTM and XGBoost against a seasonal naive baseline. "
-        "Lower MAE, RMSE, and MAPE values indicate smaller errors."
-    )
-
-    if "metrics_rec" not in st.session_state:
-        st.info(
-            "No evaluation results yet. Open Forecast, upload your data, "
-            "and select **Train models & generate forecast**."
-        )
-
+    st.title("Model Comparison")
+    st.write("This page evaluates LSTM and XGBoost on the latest available historical months. Lower error values indicate better performance.")
+    if uploaded_file is None:
+        st.info("Upload your historical monthly dataset in the sidebar first.")
     else:
-        metrics_rec = st.session_state["metrics_rec"]
-        metrics_one = st.session_state["metrics_one"]
-        evaluation = st.session_state["evaluation_df"]
-        forecast = st.session_state["forecast_df"]
-        val_df = st.session_state.get("val_df")
-        metrics_val = st.session_state.get("metrics_val")
-
-        def mape_of(df, col):
-            v = df.loc[df["Metric"] == "MAPE (%)", col].iloc[0]
-            return f"{v:.2f}%" if np.isfinite(v) else "N/A"
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Holdout months", str(len(evaluation)))
-        c2.metric("LSTM MAPE (multi-step)", mape_of(metrics_rec, "LSTM"))
-        c3.metric("XGBoost MAPE (multi-step)", mape_of(metrics_rec, "XGBoost"))
-        c4.metric("Naive MAPE", mape_of(metrics_rec, "Seasonal Naive"))
-
-        tab_names = ["Holdout · multi-step", "Holdout · one-step"]
-        if metrics_val is not None:
-            tab_names.append("2026 validation")
-        tabs = st.tabs(tab_names)
-
-        with tabs[0]:
-            render_block(
-                "Models forecast the whole holdout using only their own "
-                "previous predictions. Errors accumulate, so this is the "
-                "hardest test and matches how the final forecast works.",
-                metrics_rec, evaluation,
-                {"LSTM": "LSTM multi-step",
-                 "XGBoost": "XGBoost multi-step",
-                 "Seasonal Naive": "Seasonal Naive",
-                 "Last-12 Avg": "Last-12 Avg multi-step"},
-                "rec"
-            )
-
-        with tabs[1]:
-            render_block(
-                "Each month is predicted from the previous 12 ACTUAL months. "
-                "This isolates model quality from error accumulation.",
-                metrics_one, evaluation,
-                {"LSTM": "LSTM one-step",
-                 "XGBoost": "XGBoost one-step",
-                 "Seasonal Naive": "Seasonal Naive",
-                 "Last-12 Avg": "Last-12 Avg one-step"},
-                "one"
-            )
-
-        if metrics_val is not None:
-            with tabs[2]:
-                render_block(
-                    f"True out-of-sample check: forecasts vs the {len(val_df)} "
-                    "month(s) of 2026 actuals that were never used in "
-                    "training. Small sample, so one outlier month can move "
-                    "the MAPE a lot.",
-                    metrics_val, val_df,
-                    {"LSTM": "LSTM Forecast (kWh)",
-                     "XGBoost": "XGBoost Forecast (kWh)",
-                     "Seasonal Naive": "Seasonal Naive (kWh)",
-                     "Last-12 Avg": "Last-12 Avg (kWh)"},
-                    "val"
-                )
-
-        with st.expander("Understand the evaluation metrics"):
-            st.markdown(
-                "**MAE (Mean Absolute Error)** measures the average absolute "
-                "prediction error in kWh. **RMSE (Root Mean Squared Error)** "
-                "is also in kWh and penalizes larger errors more strongly. "
-                "**MAPE (Mean Absolute Percentage Error)** expresses average "
-                "absolute error as a percentage of actual consumption and "
-                "is not defined for zero actual values. **Seasonal Naive** "
-                "predicts each month as the same month one year earlier; a "
-                "model that cannot beat it is not adding value. These scores "
-                "do not guarantee future accuracy."
-            )
-
-        d1, d2, d3, d4 = st.columns(4)
-
-        d1.download_button(
-            "Metrics (multi-step) CSV",
-            metrics_rec.to_csv(index=False).encode("utf-8"),
-            "metrics_multistep.csv",
-            "text/csv",
-            use_container_width=True
-        )
-
-        d2.download_button(
-            "Actual vs predicted CSV",
-            evaluation.to_csv(index=False).encode("utf-8"),
-            "actual_vs_predicted.csv",
-            "text/csv",
-            use_container_width=True
-        )
-
-        d3.download_button(
-            "Forecast CSV",
-            forecast.to_csv(index=False).encode("utf-8"),
-            "monthly_load_forecast.csv",
-            "text/csv",
-            use_container_width=True
-        )
-
-        if val_df is not None:
-            d4.download_button(
-                "2026 validation CSV",
-                val_df.to_csv(index=False).encode("utf-8"),
-                "validation_2026.csv",
-                "text/csv",
-                use_container_width=True
-            )
-
-# =====================================================================
-# ABOUT PAGE
-# =====================================================================
-else:
-    page_header(
-        "PROJECT INFORMATION / ABOUT",
-        "A transparent forecasting workflow",
-        "This application is designed to support a research comparison of "
-        "two machine-learning approaches for monthly electricity consumption."
-    )
-
-    st.markdown(
-        '<div class="hero">'
-        '<div class="hero-label">Research prototype</div>'
-        '<div class="hero-title">A clearer view of model performance.</div>'
-        '<div class="hero-copy">The app combines a consistent data preparation '
-        'workflow, two forecasting models, a seasonal naive baseline, and a '
-        'shared historical evaluation period so their errors can be compared '
-        'side by side.</div>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    left, right = st.columns(2, gap="large")
-
-    with left:
-        with st.container(border=True):
-            st.markdown("### LSTM")
-            st.write(
-                "Long Short-Term Memory is a recurrent neural network designed "
-                "to learn sequential patterns from previous monthly consumption "
-                "values. Each 12-month window is divided by its own mean so the "
-                "model learns the seasonal shape instead of the absolute level."
-            )
-            st.caption("Input: previous 12 consecutive months + month encoding")
-
-        with st.container(border=True):
-            st.markdown("### Evaluation metrics")
-            st.write(
-                "MAE and RMSE are expressed in kWh. MAPE is expressed as a "
-                "percentage and excludes zero-valued actual observations. "
-                "Results are reported for multi-step and one-step holdouts, "
-                "and for 2026 actuals that are never used in training."
-            )
-
-    with right:
-        with st.container(border=True):
-            st.markdown("### XGBoost")
-            st.write(
-                "Extreme Gradient Boosting learns from lagged consumption "
-                "values (normalized by the window mean), rolling averages, "
-                "and calendar month features."
-            )
-            st.caption("Input: lag features + monthly seasonality")
-
-        with st.container(border=True):
-            st.markdown("### Important limitations")
-            st.write(
-                "Forecasts depend on the uploaded dataset and the assumptions "
-                "learned by each model. Historical evaluation scores describe "
-                "the selected holdout period only; they do not guarantee future accuracy."
-            )
-
-    st.markdown(
-        '<div class="section-heading">Data handling</div>'
-        '<div class="section-copy">The app accepts CSV and Excel files, maps '
-        'date and consumption columns, sorts records chronologically, excludes '
-        'invalid rows, and avoids training sequences that cross missing calendar '
-        'months. Duplicate months are averaged or summed (your choice in the '
-        'sidebar), so review your source data before interpreting results. '
-        'Pandemic months (2020–2021) can be excluded with a sidebar toggle, '
-        'and records from 2026 onward are never used for training or the rolling test; they are kept only as a final check.</div>',
-        unsafe_allow_html=True
-    )
-
-
-st.divider()
-
-st.markdown(
-    '<div class="note">LOAD FORECAST STUDIO · Monthly electrical load forecasting '
-    '· Academic research prototype</div>',
-    unsafe_allow_html=True
-)
+        try:
+            df, has_hours = prepare_data(uploaded_file)
+            if not has_hours or df["Operating_Hours"].isna().all():
+                st.warning("Operating hours are missing. Add an Operating_Hours column to evaluate both models with this input.")
+            elif st.button("Compare Models", type="primary"):
+                model_comparison(df)
+        except Exception as e:
+            st.error(f"Could not prepare the data: {e}")
