@@ -245,8 +245,10 @@ def recursive_lstm_forecast(model, scaler, history, start_period, steps, hours_h
         scaled_prediction=float(model.predict(sequence,verbose=0)[0][0])
         prediction=max(0.0,float(scaler.inverse_transform([[scaled_prediction]])[0][0]))
         predictions.append(prediction); scaled_history.append(float(scaler.transform([[prediction]])[0][0]))
-        if hh is not None and future_hours is not None: hh.append(float(future_hours[step]))
-        history_periods=history_periods[1:]+[target_period]
+        if hh is not None and future_hours is not None:
+            hh.append(float(future_hours[step]))
+        # Keep month features aligned after each recursive prediction.
+        history_periods = history_periods[1:] + [target_period + 1]
     return np.asarray(predictions)
 
 def calculate_metrics(actual, predicted):
