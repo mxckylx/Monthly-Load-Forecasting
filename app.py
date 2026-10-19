@@ -130,123 +130,123 @@ def latest_contiguous_segment_length(periods):
 
     return count
 
-def xgb_features(history, target_period):
-    h = np.asarray(history, dtype=float)
+def fill_monthly_hours(hours, periods):
+    """Fill missing operating hours using the same calendar month's history."""
+    hours = np.asarray(hours, dtype=float).copy()
+    periods = list(periods)
+    valid = np.isfinite(hours)
+    overall = float(np.nanmean(hours[valid])) if valid.any() else 0.0
+    month_means = {}
+    for month in range(1, 13):
+        vals = [hours[i] for i, period in enumerate(periods)
+                if period.month == month and np.isfinite(hours[i])]
+        month_means[month] = float(np.mean(vals)) if vals else overall
+    for i, period in enumerate(periods):
+        if not np.isfinite(hours[i]):
+            hours[i] = month_means[period.month]
+    return hours, month_means, overall
 
+def future_hours_for_periods(periods, month_means, overall):
+    return np.asarray([month_means.get(p.month, overall) for p in periods], dtype=float)
+
+def xgb_features(history, target_period, hours_history=None, target_hours=None):
+    h = np.asarray(history, dtype=float)
     if len(h) < LOOKBACK:
         raise ValueError("At least 12 consecutive monthly values are needed.")
-
     features = [h[-lag] for lag in range(1, LOOKBACK + 1)]
-    features += [
-        float(np.mean(h[-3:])),
-        float(np.mean(h[-6:])),
-        float(np.mean(h[-12:]))
-    ]
-    features += [
-        np.sin(2 * np.pi * target_period.month / 12),
-        np.cos(2 * np.pi * target_period.month / 12)
-    ]
-
+    features += [float(np.mean(h[-3:])), float(np.mean(h[-6:])), float(np.mean(h[-12:]))]
+    features += [np.sin(2 * np.pi * target_period.month / 12),
+                 np.cos(2 * np.pi * target_period.month / 12)]
+    if hours_history is not None:
+        hh = np.asarray(hours_history, dtype=float)
+        if len(hh) < LOOKBACK:
+            raise ValueError("At least 12 monthly operating-hour values are needed.")
+        features += [float(hh[-lag]) for lag in range(1, LOOKBACK + 1)]
+        features += [float(np.mean(hh[-3:])), float(np.mean(hh[-6:])), float(np.mean(hh[-12:]))]
+        features += [float(target_hours if target_hours is not None else np.mean(hh[-12:]))]
     return features
 
-def make_xgb_training_data(values, periods):
+def make_xgb_training_data(values, periods, hours=None):
     X, target = [], []
-
     for i in range(LOOKBACK, len(values)):
         if is_consecutive_window(periods, i - LOOKBACK, i):
-            X.append(xgb_features(values[i - LOOKBACK:i], periods[i]))
+            target_hours = float(hours[i]) if hours is not None else None
+            X.append(xgb_features(values[i-LOOKBACK:i], periods[i],
+                                  hours[i-LOOKBACK:i] if hours is not None else None,
+                                  target_hours))
             target.append(values[i])
-
     return np.asarray(X, dtype=float), np.asarray(target, dtype=float)
 
-def recursive_xgb_forecast(model, history, start_period, steps):
+def recursive_xgb_forecast(model, history, start_period, steps, hours_history=None, future_hours=None):
     history = list(np.asarray(history, dtype=float))
+    hours_history = list(np.asarray(hours_history, dtype=float)) if hours_history is not None else None
     predictions = []
-
     for step in range(steps):
-        prediction = max(
-            0.0,
-            float(model.predict(np.asarray([
-                xgb_features(history, start_period + step)
-            ]))[0])
-        )
+        target_period = start_period + step
+        target_hours = float(future_hours[step]) if future_hours is not None else None
+        prediction = max(0.0, float(model.predict(np.asarray([xgb_features(
+            history, target_period, hours_history, target_hours)]))[0]))
         predictions.append(prediction)
         history.append(prediction)
-
+        if hours_history is not None and target_hours is not None:
+            hours_history.append(target_hours)
     return np.asarray(predictions)
 
 def month_features(period):
-    """Encode calendar month so the LSTM can learn seasonal differences."""
     angle = 2 * np.pi * period.month / 12
     return [float(np.sin(angle)), float(np.cos(angle))]
 
-
-def train_lstm(training_values, training_periods):
+def train_lstm(training_values, training_periods, training_hours=None):
     training_values = np.asarray(training_values, dtype=float)
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(training_values.reshape(-1, 1)).flatten()
-
+    if training_hours is not None:
+        hours_scale = max(float(np.nanmax(training_hours)), 1.0)
+        scaled_hours = np.asarray(training_hours, dtype=float) / hours_scale
+    else:
+        hours_scale = 1.0
+        scaled_hours = None
     X, target = [], []
     for i in range(LOOKBACK, len(scaled)):
-        if is_consecutive_window(training_periods, i - LOOKBACK, i):
-            seq = []
-            for j in range(i - LOOKBACK, i):
-                seq.append([scaled[j]] + month_features(training_periods[j]))
-            X.append(seq)
-            target.append(scaled[i])
-
+        if is_consecutive_window(training_periods, i-LOOKBACK, i):
+            seq=[]
+            for j in range(i-LOOKBACK, i):
+                row = [scaled[j]] + month_features(training_periods[j])
+                if scaled_hours is not None: row.append(float(scaled_hours[j]))
+                seq.append(row)
+            X.append(seq); target.append(scaled[i])
     if len(X) < 12:
-        raise ValueError(
-            "Not enough consecutive monthly sequences to train LSTM. "
-            "At least 12 valid training sequences are recommended."
-        )
-
-    X = np.asarray(X, dtype=float).reshape(-1, LOOKBACK, 3)
+        raise ValueError("Not enough consecutive monthly sequences to train LSTM. At least 12 valid training sequences are recommended.")
+    n_features = 4 if scaled_hours is not None else 3
+    X = np.asarray(X, dtype=float).reshape(-1, LOOKBACK, n_features)
     target = np.asarray(target, dtype=float)
     tf.keras.utils.set_random_seed(42)
+    model = Sequential([Input(shape=(LOOKBACK, n_features)), LSTM(48, activation="tanh", dropout=0.10), Dense(24, activation="relu"), Dense(1)])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss="mean_squared_error")
+    model.fit(X, target, epochs=100, batch_size=8, verbose=0,
+              callbacks=[EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)], shuffle=False)
+    return model, scaler, hours_scale if scaled_hours is not None else None
 
-    model = Sequential([
-        Input(shape=(LOOKBACK, 3)),
-        LSTM(48, activation="tanh", dropout=0.10),
-        Dense(24, activation="relu"),
-        Dense(1)
-    ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                  loss="mean_squared_error")
-    model.fit(
-        X, target,
-        epochs=100,
-        batch_size=8,
-        verbose=0,
-        callbacks=[EarlyStopping(monitor="loss", patience=10,
-                                 restore_best_weights=True)],
-        shuffle=False
-    )
-    return model, scaler
-
-
-def recursive_lstm_forecast(model, scaler, history, start_period, steps):
+def recursive_lstm_forecast(model, scaler, history, start_period, steps, hours_history=None, future_hours=None, hours_scale=None):
     history = np.asarray(history, dtype=float).tolist()
-    if len(history) < LOOKBACK:
-        raise ValueError("At least 12 history values are required.")
-
-    scaled_history = scaler.transform(np.asarray(history).reshape(-1, 1)).flatten().tolist()
+    if len(history) < LOOKBACK: raise ValueError("At least 12 history values are required.")
+    scaled_history = scaler.transform(np.asarray(history).reshape(-1,1)).flatten().tolist()
     history_periods = [start_period - (LOOKBACK - 1 - i) for i in range(LOOKBACK)]
-    predictions = []
-
+    hh = np.asarray(hours_history, dtype=float).tolist() if hours_history is not None else None
+    predictions=[]
     for step in range(steps):
         target_period = start_period + step
-        seq = []
+        seq=[]
         for j in range(LOOKBACK):
-            period = history_periods[j]
-            seq.append([scaled_history[-LOOKBACK + j]] + month_features(period))
-        sequence = np.asarray(seq, dtype=float).reshape(1, LOOKBACK, 3)
-        scaled_prediction = float(model.predict(sequence, verbose=0)[0][0])
-        prediction = max(0.0, float(scaler.inverse_transform([[scaled_prediction]])[0][0]))
-        predictions.append(prediction)
-        scaled_history.append(float(scaler.transform([[prediction]])[0][0]))
-        history_periods = history_periods[1:] + [target_period]
-
+            row=[scaled_history[-LOOKBACK+j]] + month_features(history_periods[j])
+            if hh is not None: row.append(float(hh[-LOOKBACK+j] / (hours_scale or 1.0)))
+            seq.append(row)
+        sequence=np.asarray(seq,dtype=float).reshape(1,LOOKBACK,4 if hh is not None else 3)
+        scaled_prediction=float(model.predict(sequence,verbose=0)[0][0])
+        prediction=max(0.0,float(scaler.inverse_transform([[scaled_prediction]])[0][0]))
+        predictions.append(prediction); scaled_history.append(float(scaler.transform([[prediction]])[0][0]))
+        if hh is not None and future_hours is not None: hh.append(float(future_hours[step]))
+        history_periods=history_periods[1:]+[target_period]
     return np.asarray(predictions)
 
 def calculate_metrics(actual, predicted):
@@ -475,6 +475,11 @@ if uploaded_file is not None:
         data["_Consumption"] = pd.to_numeric(
             data[consumption_col], errors="coerce"
         )
+        hour_candidates = [c for c in data.columns if c != consumption_col and
+                           any(term in str(c).lower().replace("_", " ")
+                               for term in ["total hours", "total hrs", "operating hours", "operating hrs", "hours", "hrs"])]
+        hours_col = hour_candidates[0] if hour_candidates else None
+        data["_Hours"] = pd.to_numeric(data[hours_col], errors="coerce") if hours_col else np.nan
 
         invalid_count = int(
             data["_Date"].isna().sum()
@@ -485,7 +490,7 @@ if uploaded_file is not None:
             data.dropna(subset=["_Date", "_Consumption"])
             .sort_values("_Date")
             .groupby("_Date", as_index=False)
-            .agg({"_Consumption": "mean"})
+            .agg({"_Consumption": "mean", "_Hours": "mean"})
         )
 
         # Thesis rule: exclude the pandemic period and keep 2026 actuals
@@ -507,6 +512,16 @@ if uploaded_file is not None:
 
         dates = data["_Date"].tolist()
         y = data["_Consumption"].astype(float).to_numpy()
+        hours_available = hours_col is not None and data["_Hours"].notna().any()
+        if hours_available:
+            hours, hours_month_means, hours_overall_mean = fill_monthly_hours(
+                data["_Hours"].to_numpy(dtype=float), dates
+            )
+            st.success(f"Operating-hours column detected: {hours_col}. Total hours will be used during model training.")
+        else:
+            hours = None
+            hours_month_means, hours_overall_mean = {}, 0.0
+            st.info("No operating-hours column detected. Models will use consumption history only. To train with hours, include a column such as Total_Hours or Operating_Hours.")
 
         if excluded_count > 0:
             st.info(
@@ -717,11 +732,11 @@ elif page == "Forecast":
 
     if uploaded_file is None:
         st.info("Upload a CSV or Excel file from the sidebar first.")
-
     elif data_error:
         st.error(f"The uploaded data needs attention: {data_error}")
 
     else:
+        st.caption("If operating hours are included in your uploaded history, they are used during training. Future operating hours are estimated automatically from historical averages for the same calendar month; you do not need to enter them.")
         left, right = st.columns([1.25, 0.75], gap="large")
 
         with left:
@@ -782,7 +797,8 @@ elif page == "Forecast":
                 status.info("Preparing training and evaluation data…")
                 progress.progress(10)
 
-                Xtr, ytr = make_xgb_training_data(train_y, train_dates)
+                train_hours = hours[:split] if hours_available else None
+                Xtr, ytr = make_xgb_training_data(train_y, train_dates, train_hours)
 
                 if len(Xtr) < 5:
                     raise ValueError(
@@ -806,7 +822,7 @@ elif page == "Forecast":
                 status.info("Training LSTM…")
                 progress.progress(45)
 
-                lstm, scaler = train_lstm(train_y, train_dates)
+                lstm, scaler, hours_scale = train_lstm(train_y, train_dates, train_hours)
 
                 status.info("Evaluating both models on held-out months…")
                 progress.progress(65)
@@ -814,12 +830,14 @@ elif page == "Forecast":
                 eval_dates = dates[split:]
                 actual = y[split:]
 
+                eval_hours = hours[split:split + eval_h] if hours_available else None
                 xgb_test = recursive_xgb_forecast(
-                    xgb, train_y[-LOOKBACK:], eval_dates[0], eval_h
+                    xgb, train_y[-LOOKBACK:], eval_dates[0], eval_h,
+                    train_hours[-LOOKBACK:] if hours_available else None, eval_hours
                 )
-
                 lstm_test = recursive_lstm_forecast(
-                    lstm, scaler, train_y[-LOOKBACK:], eval_dates[0] - 1, eval_h
+                    lstm, scaler, train_y[-LOOKBACK:], eval_dates[0] - 1, eval_h,
+                    train_hours[-LOOKBACK:] if hours_available else None, eval_hours, hours_scale
                 )
 
                 xm = calculate_metrics(actual, xgb_test)
@@ -836,7 +854,7 @@ elif page == "Forecast":
                 )
                 progress.progress(80)
 
-                all_X, all_y = make_xgb_training_data(y, dates)
+                all_X, all_y = make_xgb_training_data(y, dates, hours if hours_available else None)
 
                 if len(all_X) < 5:
                     raise ValueError(
@@ -853,7 +871,7 @@ elif page == "Forecast":
                 )
                 final_xgb.fit(all_X, all_y)
 
-                final_lstm, final_scaler = train_lstm(y, dates)
+                final_lstm, final_scaler, final_hours_scale = train_lstm(y, dates, hours if hours_available else None)
 
                 future_periods = [
                     dates[-1] + i for i in range(1, horizon + 1)
@@ -867,12 +885,16 @@ elif page == "Forecast":
 
                 history = y[-LOOKBACK:]
 
+                future_hours = future_hours_for_periods(
+                    future_periods, hours_month_means, hours_overall_mean
+                ) if hours_available else None
                 xf = recursive_xgb_forecast(
-                    final_xgb, history, future_periods[0], horizon
+                    final_xgb, history, future_periods[0], horizon,
+                    hours[-LOOKBACK:] if hours_available else None, future_hours
                 )
-
                 lf = recursive_lstm_forecast(
-                    final_lstm, final_scaler, history, dates[-1], horizon
+                    final_lstm, final_scaler, history, dates[-1], horizon,
+                    hours[-LOOKBACK:] if hours_available else None, future_hours, final_hours_scale
                 )
 
                 forecast = pd.DataFrame({
