@@ -305,7 +305,7 @@ def recursive_lstm_forecast(model, scaler, history, start_period, steps, hours_h
         if hh is not None and future_hours is not None:
             hh.append(float(future_hours[step]))
         # Keep month features aligned after each recursive prediction.
-        history_periods = history_periods[1:] + [target_period + 1]
+        history_periods = history_periods[1:] + [target_period]
     return np.asarray(predictions)
 
 def onestep_lstm(model, scaler, y, periods, hours, hours_scale, idxs):
