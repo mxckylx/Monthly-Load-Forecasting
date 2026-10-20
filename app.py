@@ -1,4 +1,3 @@
-
 import warnings
 import numpy as np
 import pandas as pd
@@ -319,17 +318,6 @@ def onestep_lstm(model, scaler, y, periods, hours, hours_scale, idxs):
         preds.append(p[0])
     return np.asarray(preds)
 
-def seasonal_naive(target_periods, value_map):
-    """Forecast for a month = actual of the same month one year earlier (reference benchmark)."""
-    vm = dict(value_map)
-    out = []
-    for p in target_periods:
-        v = vm.get(p - 12, np.nan)
-        out.append(v)
-        if p not in vm:
-            vm[p] = v
-    return np.asarray(out, dtype=float)
-
 def calculate_metrics(actual, predicted):
     mae = mean_absolute_error(actual, predicted)
     rmse = np.sqrt(mean_squared_error(actual, predicted))
@@ -351,21 +339,12 @@ def calculate_metrics(actual, predicted):
 
     return mae, rmse, mape
 
-def naive_metrics(actual, naive_pred):
-    actual = np.asarray(actual, dtype=float)
-    naive_pred = np.asarray(naive_pred, dtype=float)
-    mask = np.isfinite(naive_pred) & np.isfinite(actual)
-    if not mask.any():
-        return (np.nan, np.nan, np.nan)
-    return calculate_metrics(actual[mask], naive_pred[mask])
-
-def build_eval_df(eval_dates, actual, lstm_pred, xgb_pred, naive_pred):
+def build_eval_df(eval_dates, actual, lstm_pred, xgb_pred):
     df = pd.DataFrame({
         "Month": [str(d) for d in eval_dates],
         "Actual (kWh)": np.asarray(actual, dtype=float),
         "LSTM Prediction (kWh)": np.asarray(lstm_pred, dtype=float),
         "XGBoost Prediction (kWh)": np.asarray(xgb_pred, dtype=float),
-        "Seasonal Naive (kWh)": np.asarray(naive_pred, dtype=float),
     })
     df["LSTM AE (kWh)"] = (df["Actual (kWh)"] - df["LSTM Prediction (kWh)"]).abs()
     df["XGBoost AE (kWh)"] = (df["Actual (kWh)"] - df["XGBoost Prediction (kWh)"]).abs()
@@ -375,18 +354,18 @@ def build_eval_df(eval_dates, actual, lstm_pred, xgb_pred, naive_pred):
     df["XGBoost APE (%)"] = df["XGBoost AE (kWh)"] / safe_actual * 100
     return df
 
+
 def eval_metric_bundle(df):
     actual = df["Actual (kWh)"].to_numpy()
     lm = calculate_metrics(actual, df["LSTM Prediction (kWh)"].to_numpy())
     xm = calculate_metrics(actual, df["XGBoost Prediction (kWh)"].to_numpy())
-    nm = naive_metrics(actual, df["Seasonal Naive (kWh)"].to_numpy())
     metrics = pd.DataFrame({
         "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
         "LSTM": list(lm),
-        "XGBoost": list(xm),
-        "Seasonal Naive": list(nm)
+        "XGBoost": list(xm)
     })
-    return metrics, lm, xm, nm
+    return metrics, lm, xm
+
 
 def paired_error_tests(ae_lstm, ae_xgb):
     """Shapiro-Wilk on d = AE_LSTM - AE_XGBoost, then paired t-test (normal) or Wilcoxon (not normal)."""
@@ -414,10 +393,7 @@ def paired_error_tests(ae_lstm, ae_xgb):
     except Exception:
         out["w"], out["w_p"] = np.nan, np.nan
     out["normal"] = bool(np.isfinite(out["sw_p"]) and out["sw_p"] >= 0.05)
-    if out["normal"]:
-        out["chosen"], out["chosen_p"] = "Paired t-test", out["t_p"]
-    else:
-        out["chosen"], out["chosen_p"] = "Wilcoxon signed-rank", out["w_p"]
+    out["chosen"], out["chosen_p"] = "Paired t-test", out["t_p"]
     return out
 
 def tune_hyperparameters(y, dates, hours, mode, val_start, test_start, progress=None, status=None):
@@ -701,11 +677,9 @@ if uploaded_file is not None:
         data["_Consumption"] = pd.to_numeric(
             data[consumption_col], errors="coerce"
         )
-        hour_candidates = [c for c in data.columns if c != consumption_col and
-                           any(term in str(c).lower().replace("_", " ")
-                               for term in ["total hours", "total hrs", "operating hours", "operating hrs", "hours", "hrs"])]
-        hours_col = hour_candidates[0] if hour_candidates else None
-        data["_Hours"] = pd.to_numeric(data[hours_col], errors="coerce") if hours_col else np.nan
+        # Thesis scope uses monthly consumption only; operating hours are not model inputs.
+        data["_Hours"] = np.nan
+        hours_col = None
 
         invalid_count = int(
             data["_Date"].isna().sum()
@@ -739,35 +713,9 @@ if uploaded_file is not None:
         dates = data["_Date"].tolist()
         y = data["_Consumption"].astype(float).to_numpy()
 
-        # Operating hours are an OPTIONAL experiment. Main study = consumption-only.
-        hours_in_file = hours_col is not None and data["_Hours"].notna().any()
-        if hours_in_file:
-            hours_coverage = float(data["_Hours"].notna().mean())
-            with st.sidebar:
-                use_hours = st.checkbox(
-                    "Use operating hours (optional experiment)",
-                    value=False,
-                    key="use_hours",
-                    help="Thesis main study is consumption-only. Turn this on only for the extra hours experiment."
-                )
-            if use_hours:
-                hours, hours_month_means, hours_overall_mean = fill_monthly_hours(
-                    data["_Hours"].to_numpy(dtype=float), dates
-                )
-                hours_available = True
-                st.success(f"Operating-hours column '{hours_col}' will be used as an extra input.")
-                if hours_coverage < 0.8:
-                    st.warning(
-                        f"Hours exist for only {hours_coverage:.0%} of the months. Missing months are filled "
-                        "with the average of the same calendar month, which can add noise."
-                    )
-            else:
-                st.info(
-                    f"Operating-hours column '{hours_col}' detected but not used. "
-                    "Models use consumption history only (thesis main setup)."
-                )
-        else:
-            st.info("No operating-hours column detected. Models use consumption history only.")
+        hours = None
+        hours_available = False
+        st.info("Thesis setup: both models use historical monthly consumption only.")
 
         if excluded_count > 0:
             st.info(
@@ -874,7 +822,7 @@ if page == "Home":
                 ("02", "Train the models",
                  "Run LSTM and XGBoost on the same historical dataset, with optional validation tuning."),
                 ("03", "Compare and export",
-                 "Review MAE, RMSE, MAPE, the seasonal naive benchmark, paired statistical tests, and downloadable results.")
+                 "Review MAE, RMSE, MAPE, paired absolute errors, statistical tests, and downloadable results.")
             ]
 
             for number, title, description in steps:
@@ -1012,7 +960,7 @@ elif page == "Forecast":
         st.error(f"The uploaded data needs attention: {data_error}")
 
     else:
-        st.caption("Main thesis setup is consumption-only. Operating hours are used only if you switch them on in the sidebar; future hours are then estimated from the average of the same calendar month.")
+        st.caption("Both models use historical monthly electricity consumption only, consistent with the study scope.")
         left, right = st.columns([1.25, 0.75], gap="large")
 
         with left:
@@ -1152,14 +1100,12 @@ elif page == "Forecast":
                 )
                 one_x = onestep_xgb(xgb, y, dates, h_all, feature_mode, idxs, eval_hours)
                 one_l = onestep_lstm(lstm, scaler, y, dates, h_all, hours_scale, idxs)
-                naive_eval = seasonal_naive(eval_dates, dict(zip(dates, y)))
-
                 eval_sets = {}
                 for name, pl, px in [(EVAL_RECURSIVE, rec_l, rec_x), (EVAL_ONESTEP, one_l, one_x)]:
-                    df_eval = build_eval_df(eval_dates, actual, pl, px, naive_eval)
-                    metrics_tbl, lm, xm, nm = eval_metric_bundle(df_eval)
+                    df_eval = build_eval_df(eval_dates, actual, pl, px)
+                    metrics_tbl, lm, xm = eval_metric_bundle(df_eval)
                     eval_sets[name] = {"evaluation": df_eval, "metrics": metrics_tbl,
-                                       "lm": lm, "xm": xm, "nm": nm}
+                                       "lm": lm, "xm": xm}
 
                 status.info("Retraining with all records and forecasting future months…")
                 progress.progress(80)
@@ -1197,13 +1143,10 @@ elif page == "Forecast":
                     final_lstm, final_scaler, history, dates[-1], horizon,
                     h_all[-LOOKBACK:] if use_h else None, future_hours, final_hours_scale
                 )
-                naive_future = seasonal_naive(future_periods, dict(zip(dates, y)))
-
                 forecast = pd.DataFrame({
                     "Month": [str(p) for p in future_periods],
                     "LSTM Forecast (kWh)": lf,
-                    "XGBoost Forecast (kWh)": xf,
-                    "Seasonal Naive (kWh)": naive_future
+                    "XGBoost Forecast (kWh)": xf
                 })
 
                 st.session_state["eval_sets"] = eval_sets
@@ -1244,7 +1187,7 @@ elif page == "Forecast":
             if run_info:
                 st.caption(
                     f"Features: {'thesis spec (lag 1, 2, 3, 12 + month)' if run_info['feature_mode'] == 'paper' else 'extended'} · "
-                    f"Hours: {'on' if run_info['use_hours'] else 'off'} · "
+                    
                     f"Tuning: {'validated' if run_info['tuned'] else 'baseline settings'} · "
                     f"Training sequences: {run_info['train_sequences']}"
                 )
@@ -1275,14 +1218,6 @@ elif page == "Forecast":
                 mode="lines+markers",
                 name="XGBoost",
                 line=dict(color="#345b88", width=3)
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=forecast_df["Month"],
-                y=forecast_df["Seasonal Naive (kWh)"],
-                mode="lines+markers",
-                name="Seasonal naive",
-                line=dict(color="#9aa8b8", width=2, dash="dash")
             ))
 
             fig.update_layout(
@@ -1345,12 +1280,12 @@ elif page == "Model Comparison":
                  "One-step-ahead: every month is predicted from actual past months."
         )
         res = eval_sets[mode_name]
-        evaluation, metrics, lm, xm, nm = res["evaluation"], res["metrics"], res["lm"], res["xm"], res["nm"]
+        evaluation, metrics, lm, xm = res["evaluation"], res["metrics"], res["lm"], res["xm"]
 
         if run_info:
             st.caption(
                 f"XGBoost features: {'thesis spec (lag 1, 2, 3, 12 + month)' if run_info['feature_mode'] == 'paper' else 'extended'} · "
-                f"Hours: {'on' if run_info['use_hours'] else 'off'} · "
+                
                 f"Tuning: {'validated (' + str(run_info['val_months']) + ' months)' if run_info['tuned'] else 'baseline settings'} · "
                 f"Test months: {run_info['eval_months']} · XGBoost: {run_info['xgb_cfg']} · LSTM: {run_info['lstm_cfg']}"
             )
@@ -1359,12 +1294,12 @@ elif page == "Model Comparison":
         c1.metric("Evaluation months", str(len(evaluation)))
         c2.metric("LSTM MAPE", f"{lm[2]:.2f}%" if np.isfinite(lm[2]) else "N/A")
         c3.metric("XGBoost MAPE", f"{xm[2]:.2f}%" if np.isfinite(xm[2]) else "N/A")
-        c4.metric("Seasonal naive MAPE", f"{nm[2]:.2f}%" if np.isfinite(nm[2]) else "N/A")
+        c4.metric("LSTM MAE", f"{lm[0]:,.0f} kWh")
 
         st.markdown(
             '<div class="section-heading">Evaluation scorecard</div>'
             '<div class="section-copy">Both models are evaluated on the same '
-            'historical test period. Seasonal naive (same month last year) is only a reference benchmark, not a third model.</div>',
+            'historical test period using MAE, RMSE, and MAPE, as specified in the study.</div>',
             unsafe_allow_html=True
         )
 
@@ -1379,7 +1314,6 @@ elif page == "Model Comparison":
         fig = go.Figure()
         fig.add_trace(go.Bar(name="LSTM", x=metric_names, y=lm, marker_color="#0e9384"))
         fig.add_trace(go.Bar(name="XGBoost", x=metric_names, y=xm, marker_color="#345b88"))
-        fig.add_trace(go.Bar(name="Seasonal naive", x=metric_names, y=list(nm), marker_color="#b7c3d0"))
 
         fig.update_layout(
             title="Error metrics by model",
@@ -1417,15 +1351,6 @@ elif page == "Model Comparison":
                 "and chart together."
             )
 
-        if np.isfinite(nm[0]):
-            beat_l = sum(a < b for a, b in zip(lm, nm) if np.isfinite(a) and np.isfinite(b))
-            beat_x = sum(a < b for a, b in zip(xm, nm) if np.isfinite(a) and np.isfinite(b))
-            st.caption(
-                f"Against the seasonal naive benchmark: LSTM is lower in {beat_l} of 3 metrics, "
-                f"XGBoost is lower in {beat_x} of 3. If a model does not beat the benchmark, "
-                "the data (or the setup) is the bottleneck, not just the model."
-            )
-
         st.markdown(
             '<div class="section-heading">Actual vs predicted</div>'
             '<div class="section-copy">This chart shows the test months '
@@ -1451,11 +1376,6 @@ elif page == "Model Comparison":
             mode="lines+markers", name="XGBoost",
             line=dict(color="#345b88", width=2)
         ))
-        fig.add_trace(go.Scatter(
-            x=evaluation["Month"], y=evaluation["Seasonal Naive (kWh)"],
-            mode="lines+markers", name="Seasonal naive",
-            line=dict(color="#9aa8b8", width=2, dash="dash")
-        ))
 
         st.plotly_chart(chart_style(fig, 430), use_container_width=True)
 
@@ -1464,13 +1384,13 @@ elif page == "Model Comparison":
             use_container_width=True,
             hide_index=True
         )
-        st.caption("APE = absolute percentage error of one month. Check if one or two months with low actual values are pulling MAPE up.")
+        st.caption("AE = absolute error for each month. APE = absolute percentage error for each month.")
 
         # STATISTICAL TEST (thesis section 2.8)
         st.markdown(
             '<div class="section-heading">Statistical test on paired errors</div>'
             '<div class="section-copy">Per month, d = AE of LSTM − AE of XGBoost. Shapiro-Wilk checks if d is normal at α = 0.05. '
-            'If normal, the paired t-test is used; if not, the Wilcoxon signed-rank test.</div>',
+            'The study specifies a paired t-test at α = 0.05. Shapiro-Wilk checks whether the paired differences are approximately normal.</div>',
             unsafe_allow_html=True
         )
         tests = paired_error_tests(evaluation["LSTM AE (kWh)"], evaluation["XGBoost AE (kWh)"])
@@ -1484,10 +1404,10 @@ elif page == "Model Comparison":
             t4.metric(f"{tests['chosen']} p", fmt_p(tests["chosen_p"]))
 
             test_table = pd.DataFrame({
-                "Test": ["Shapiro-Wilk (normality of d)", "Paired t-test", "Wilcoxon signed-rank"],
+                "Test": ["Shapiro-Wilk (normality of d)", "Paired t-test", "Wilcoxon signed-rank (supplementary)"],
                 "Statistic": [tests["sw_W"], tests["t"], tests["w"]],
                 "p-value": [tests["sw_p"], tests["t_p"], tests["w_p"]],
-                "Used for decision": ["", "✓" if tests["normal"] else "", "" if tests["normal"] else "✓"]
+                "Used for decision": ["Normality check", "Specified by study", "Supplementary only"]
             })
             st.dataframe(test_table.round(4), use_container_width=True, hide_index=True)
 
@@ -1518,8 +1438,8 @@ elif page == "Model Comparison":
                                  xaxis_title="Theoretical quantiles", yaxis_title="Ordered d (kWh)")
             st.plotly_chart(chart_style(fig_qq, 360), use_container_width=True)
             st.caption(
-                f"Only {tests['n']} monthly pairs are available, so the tests have low power, and monthly errors "
-                "can be correlated. Report this as a limitation and read the result together with MAE, RMSE, and MAPE."
+                f"Only {tests['n']} monthly pairs are available, so the test may have low power, and monthly errors "
+                "can be correlated. Interpret the p-value together with MAE, RMSE, and MAPE."
             )
 
         # 2026 OUT-OF-SAMPLE VALIDATION
@@ -1556,18 +1476,16 @@ elif page == "Model Comparison":
             else:
                 val_lstm = calculate_metrics(overlap["Actual (kWh)"], overlap["LSTM Forecast (kWh)"])
                 val_xgb = calculate_metrics(overlap["Actual (kWh)"], overlap["XGBoost Forecast (kWh)"])
-                val_naive = naive_metrics(overlap["Actual (kWh)"], overlap["Seasonal Naive (kWh)"])
                 val_metrics = pd.DataFrame({
                     "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
                     "LSTM": list(val_lstm),
-                    "XGBoost": list(val_xgb),
-                    "Seasonal Naive": list(val_naive)
+                    "XGBoost": list(val_xgb)
                 })
                 v1, v2, v3, v4 = st.columns(4)
                 v1.metric("2026 months checked", str(len(overlap)))
                 v2.metric("2026 LSTM MAPE", f"{val_lstm[2]:.2f}%")
                 v3.metric("2026 XGBoost MAPE", f"{val_xgb[2]:.2f}%")
-                v4.metric("2026 naive MAPE", f"{val_naive[2]:.2f}%" if np.isfinite(val_naive[2]) else "N/A")
+                v4.metric("Months compared", str(len(overlap)))
                 st.dataframe(overlap.round(2), use_container_width=True, hide_index=True)
                 st.dataframe(val_metrics.round(3), use_container_width=True, hide_index=True)
 
@@ -1646,7 +1564,7 @@ else:
             st.write(
                 "MAE and RMSE are expressed in kWh. MAPE is expressed as a "
                 "percentage and excludes zero-valued actual observations. "
-                "A seasonal naive forecast (same month last year) is shown as a reference benchmark."
+                "The study compares LSTM and XGBoost only."
             )
 
     with right:
@@ -1662,8 +1580,7 @@ else:
             st.markdown("### Statistical comparison")
             st.write(
                 "Absolute errors of the two models are paired per month. Shapiro-Wilk checks "
-                "normality of the differences, then a paired t-test (or Wilcoxon signed-rank test "
-                "if not normal) is applied at α = 0.05."
+                "normality of the differences, followed by the paired t-test specified in the study at α = 0.05."
             )
 
     with st.container(border=True):
