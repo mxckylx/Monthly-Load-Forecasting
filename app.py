@@ -88,12 +88,7 @@ with st.sidebar:
         help="Use the historical monthly data only; pandemic years are excluded."
     )
 
-    validation_file = st.file_uploader(
-        "Optional: upload 2026 actuals for validation",
-        type=["xlsx", "xls", "csv"],
-        help="For the AMTES–Meralco workbook, the app reads the '2026' sheet."
-    )
-    st.caption("Training data: Date/Year + Month + Consumption_kWh. Keep 2026 actuals separate.")
+    st.caption("Training data: Date/Year + Month + Consumption_kWh. Use historical data through 2025.")
 
     if uploaded_file is not None:
         st.markdown(
@@ -172,9 +167,9 @@ def fill_monthly_hours(hours, periods):
 def future_hours_for_periods(periods, month_means, overall):
     return np.asarray([month_means.get(p.month, overall) for p in periods], dtype=float)
 
-def xgb_lags(mode):
-    """'paper' = lag 1, 2, 3, 12 (as written in the thesis). 'extended' = lag 1-12 + rolling means."""
-    return [1, 2, 3, 12] if mode == "paper" else list(range(1, LOOKBACK + 1))
+def xgb_lags(mode="paper"):
+    """Use the thesis-specified consumption lags: 1, 2, 3, and 12 months."""
+    return [1, 2, 3, 12]
 
 def xgb_features(history, target_period, mode="paper", hours_history=None, target_hours=None):
     h = np.asarray(history, dtype=float)
@@ -182,8 +177,6 @@ def xgb_features(history, target_period, mode="paper", hours_history=None, targe
         raise ValueError("At least 12 consecutive monthly values are needed.")
     lags = xgb_lags(mode)
     features = [float(h[-lag]) for lag in lags]
-    if mode == "extended":
-        features += [float(np.mean(h[-3:])), float(np.mean(h[-6:])), float(np.mean(h[-12:]))]
     features += [np.sin(2 * np.pi * target_period.month / 12),
                  np.cos(2 * np.pi * target_period.month / 12)]
     if hours_history is not None:
@@ -191,8 +184,6 @@ def xgb_features(history, target_period, mode="paper", hours_history=None, targe
         if len(hh) < LOOKBACK:
             raise ValueError("At least 12 monthly operating-hour values are needed.")
         features += [float(hh[-lag]) for lag in lags]
-        if mode == "extended":
-            features += [float(np.mean(hh[-3:])), float(np.mean(hh[-6:])), float(np.mean(hh[-12:]))]
         features += [float(target_hours if target_hours is not None else np.mean(hh[-12:]))]
     return features
 
@@ -290,7 +281,7 @@ def recursive_lstm_forecast(model, scaler, history, start_period, steps, hours_h
     hh = np.asarray(hours_history, dtype=float).tolist() if hours_history is not None else None
     predictions = []
     for step in range(steps):
-        target_period = start_period + step
+        target_period = start_period + step + 1
         seq = []
         for j in range(LOOKBACK):
             row = [scaled_history[-LOOKBACK+j]] + month_features(history_periods[j])
@@ -368,32 +359,50 @@ def eval_metric_bundle(df):
 
 
 def paired_error_tests(ae_lstm, ae_xgb):
-    """Shapiro-Wilk on d = AE_LSTM - AE_XGBoost, then paired t-test (normal) or Wilcoxon (not normal)."""
+    """Check normality of paired absolute-error differences, then select t-test or Wilcoxon."""
     ae_l = np.asarray(ae_lstm, dtype=float)
     ae_x = np.asarray(ae_xgb, dtype=float)
+    valid = np.isfinite(ae_l) & np.isfinite(ae_x)
+    ae_l, ae_x = ae_l[valid], ae_x[valid]
     d = ae_l - ae_x
     n = len(d)
-    out = {"n": n, "d": d, "mean_d": float(np.mean(d)) if n else np.nan}
+    out = {
+        "n": n,
+        "d": d,
+        "mean_d": float(np.mean(d)) if n else np.nan,
+        "median_d": float(np.median(d)) if n else np.nan,
+    }
     if n < 3:
         out["error"] = "At least 3 paired months are needed for the statistical tests."
         return out
+
     try:
         sw = stats.shapiro(d)
         out["sw_W"], out["sw_p"] = float(sw.statistic), float(sw.pvalue)
     except Exception:
         out["sw_W"], out["sw_p"] = np.nan, np.nan
+
     try:
-        tt = stats.ttest_rel(ae_l, ae_x)
+        tt = stats.ttest_rel(ae_l, ae_x, nan_policy="omit")
         out["t"], out["t_p"] = float(tt.statistic), float(tt.pvalue)
     except Exception:
         out["t"], out["t_p"] = np.nan, np.nan
+
     try:
-        wx = stats.wilcoxon(d)
-        out["w"], out["w_p"] = float(wx.statistic), float(wx.pvalue)
+        # Wilcoxon can fail if all paired differences are zero; handle that gracefully.
+        if np.allclose(d, 0):
+            out["w"], out["w_p"] = 0.0, 1.0
+        else:
+            wx = stats.wilcoxon(d, zero_method="wilcox", alternative="two-sided")
+            out["w"], out["w_p"] = float(wx.statistic), float(wx.pvalue)
     except Exception:
         out["w"], out["w_p"] = np.nan, np.nan
+
     out["normal"] = bool(np.isfinite(out["sw_p"]) and out["sw_p"] >= 0.05)
-    out["chosen"], out["chosen_p"] = "Paired t-test", out["t_p"]
+    if out["normal"]:
+        out["chosen"], out["chosen_p"], out["chosen_stat"] = "Paired t-test", out["t_p"], out["t"]
+    else:
+        out["chosen"], out["chosen_p"], out["chosen_stat"] = "Wilcoxon signed-rank", out["w_p"], out["w"]
     return out
 
 def tune_hyperparameters(y, dates, hours, mode, val_start, test_start, progress=None, status=None):
@@ -448,80 +457,6 @@ def tune_hyperparameters(y, dates, hours, mode, val_start, test_start, progress=
         progress.progress(45)
 
     return best_x, best_l, pd.DataFrame(rows)
-
-def read_2026_validation_file(file, kwh_col_index=11):  # 11 = column L, only used for the old AMTES workbook
-    """Read separate 2026 actuals without ever adding them to training data."""
-    if file is None:
-        return pd.DataFrame(columns=["Month", "Actual (kWh)"])
-
-    month_map = {
-        "jan": 1, "january": 1, "jan.": 1,
-        "feb": 2, "february": 2, "feb.": 2,
-        "mar": 3, "march": 3, "mar.": 3,
-        "apr": 4, "april": 4, "apr.": 4,
-        "may": 5, "jun": 6, "june": 6, "jun.": 6,
-        "jul": 7, "july": 7, "jul.": 7,
-        "aug": 8, "august": 8, "aug.": 8,
-        "sep": 9, "sept": 9, "september": 9, "sep.": 9,
-        "oct": 10, "october": 10, "oct.": 10,
-        "nov": 11, "november": 11, "nov.": 11,
-        "dec": 12, "december": 12, "dec.": 12
-    }
-
-    def parse_generic(frame):
-        frame = frame.copy()
-        frame.columns = [str(c).strip().lower() for c in frame.columns]
-        date_col = next((c for c in frame.columns if c in ["date", "month", "period"]), None)
-        value_col = next((c for c in frame.columns if "consumption" in c or "kwh" in c or c == "actual"), None)
-        if date_col is None or value_col is None:
-            return None
-        parsed_dates = pd.to_datetime(frame[date_col], errors="coerce").dt.to_period("M")
-        values = pd.to_numeric(frame[value_col], errors="coerce")
-        res = pd.DataFrame({"_period": parsed_dates, "Actual (kWh)": values}).dropna()
-        return res[res["_period"].apply(lambda p: p.year == 2026)]
-
-    if file.name.lower().endswith(".csv"):
-        out = parse_generic(pd.read_csv(file))
-        if out is None:
-            raise ValueError("For a CSV, use columns named Date and Consumption_kWh.")
-    else:
-        # Sheet '2026', month labels in column A, kWh in the column chosen in the sidebar.
-        book = pd.ExcelFile(file)
-        sheet = next((x for x in book.sheet_names if x.strip().lower() == "2026"), None)
-        if sheet is None:
-            # Simple layout: first sheet with Date + Consumption_kWh columns
-            out = parse_generic(pd.read_excel(file, sheet_name=book.sheet_names[0]))
-            if out is None:
-                raise ValueError("Excel validation file needs a sheet named '2026', or columns named Date and Consumption_kWh.")
-            if out.empty:
-                raise ValueError("No 2026 actual monthly consumption values were found in the validation file.")
-            sheet = None
-        if sheet is not None:
-            frame = pd.read_excel(file, sheet_name=sheet, header=None)
-            rows = []
-            for _, row in frame.iterrows():
-                label = str(row.iloc[0]).strip().lower().replace("\n", " ") if len(row) else ""
-                key = label.split()[0] if label else ""
-                month_num = month_map.get(key)
-                if month_num and len(row) > kwh_col_index:
-                    value = pd.to_numeric(pd.Series([row.iloc[kwh_col_index]]), errors="coerce").iloc[0]
-                    if pd.notna(value):
-                        rows.append((pd.Period(year=2026, month=month_num, freq="M"), float(value)))
-            out = pd.DataFrame(rows, columns=["_period", "Actual (kWh)"])
-            if out.empty:
-                # Sheet is named 2026 but uses the simple Date + Consumption_kWh layout
-                generic = parse_generic(pd.read_excel(file, sheet_name=sheet))
-                if generic is not None:
-                    out = generic
-
-    if out.empty:
-        raise ValueError("No 2026 actual monthly consumption values were found in the validation file.")
-    duplicates = int(len(out) - out["_period"].nunique())
-    out = out.sort_values("_period").drop_duplicates("_period", keep="first")
-    out["Month"] = out["_period"].astype(str)
-    result = out[["Month", "Actual (kWh)"]].reset_index(drop=True)
-    result.attrs["duplicates"] = duplicates
-    return result
 
 # DATA PREPARATION
 raw_df = None
@@ -693,11 +628,10 @@ if uploaded_file is not None:
             .agg({"_Consumption": "mean", "_Hours": "mean"})
         )
 
-        # Thesis rule: exclude the pandemic period and keep 2026 actuals
-        # out of model training so they can be checked separately.
+        # Thesis rule: exclude pandemic years and use historical data through 2025.
         before_filter_count = len(data)
         data = data[
-            ~data["_Date"].apply(lambda p: p.year in (2020, 2021) or p.year >= 2026)
+            ~data["_Date"].apply(lambda p: p.year in (2020, 2021) or p.year > 2025)
         ].copy()
         excluded_count = before_filter_count - len(data)
 
@@ -720,8 +654,7 @@ if uploaded_file is not None:
         if excluded_count > 0:
             st.info(
                 f"Excluded {excluded_count} record(s) from training: "
-                "pandemic-period months (2020–2021) and records from 2026 onward. "
-                "2026 actual consumption is not used to train the models."
+                "pandemic-period months (2020–2021) and records after 2025."
             )
 
         missing_months = [
@@ -740,14 +673,6 @@ if uploaded_file is not None:
 
     except Exception as error:
         data_error = str(error)
-
-validation_actuals = pd.DataFrame(columns=["Month", "Actual (kWh)"])
-validation_error = None
-if validation_file is not None:
-    try:
-        validation_actuals = read_2026_validation_file(validation_file)
-    except Exception as error:
-        validation_error = str(error)
 
 
 # PAGE HELPERS
@@ -951,7 +876,7 @@ elif page == "Forecast":
         "WORKSPACE / FORECAST",
         "Generate a monthly forecast",
         "Choose a forecast horizon, train both models, and generate future "
-        "consumption estimates from your uploaded history."
+        "consumption estimates from your uploaded historical data."
     )
 
     if uploaded_file is None:
@@ -977,14 +902,7 @@ elif page == "Forecast":
                 format_func=lambda x: f"{x} month(s)"
             )
 
-            feature_choice = st.radio(
-                "XGBoost input features",
-                ["Thesis spec: lag 1, 2, 3, 12 + month",
-                 "Extended: lag 1–12 + rolling means + month"],
-                key="feature_choice",
-                help="The thesis table lists lag 1, 2, 3, and 12. Extended has more features and can overfit small data."
-            )
-            feature_mode = "paper" if feature_choice.startswith("Thesis") else "extended"
+            feature_mode = "paper"  # Fixed to the features specified in the thesis.
 
             tune_choice = st.checkbox(
                 "Tune hyperparameters on a validation period",
@@ -1006,14 +924,15 @@ elif page == "Forecast":
             st.metric("Latest available month", str(dates[-1]))
             st.metric("Missing timeline gaps", str(len(missing_months)))
 
-        if len(y) - horizon < 18:
-            st.error("There are not enough observations for the selected evaluation setup.")
+        latest_data_segment = latest_contiguous_segment_length(dates)
+        if latest_data_segment <= LOOKBACK:
+            st.error("At least 13 consecutive monthly records are needed for the evaluation setup.")
 
         if st.button(
             "Train models & generate forecast",
             type="primary",
             use_container_width=True,
-            disabled=(len(y) - horizon < 18)
+            disabled=(latest_data_segment <= LOOKBACK)
         ):
             progress = st.progress(0)
             status = st.empty()
@@ -1186,7 +1105,7 @@ elif page == "Forecast":
             run_info = st.session_state.get("run_info", {})
             if run_info:
                 st.caption(
-                    f"Features: {'thesis spec (lag 1, 2, 3, 12 + month)' if run_info['feature_mode'] == 'paper' else 'extended'} · "
+                    "Features: thesis spec (lag 1, 2, 3, 12 + month) · "
                     
                     f"Tuning: {'validated' if run_info['tuned'] else 'baseline settings'} · "
                     f"Training sequences: {run_info['train_sequences']}"
@@ -1284,7 +1203,7 @@ elif page == "Model Comparison":
 
         if run_info:
             st.caption(
-                f"XGBoost features: {'thesis spec (lag 1, 2, 3, 12 + month)' if run_info['feature_mode'] == 'paper' else 'extended'} · "
+                "XGBoost features: thesis spec (lag 1, 2, 3, 12 + month) · "
                 
                 f"Tuning: {'validated (' + str(run_info['val_months']) + ' months)' if run_info['tuned'] else 'baseline settings'} · "
                 f"Test months: {run_info['eval_months']} · XGBoost: {run_info['xgb_cfg']} · LSTM: {run_info['lstm_cfg']}"
@@ -1390,7 +1309,7 @@ elif page == "Model Comparison":
         st.markdown(
             '<div class="section-heading">Statistical test on paired errors</div>'
             '<div class="section-copy">Per month, d = AE of LSTM − AE of XGBoost. Shapiro-Wilk checks if d is normal at α = 0.05. '
-            'The study specifies a paired t-test at α = 0.05. Shapiro-Wilk checks whether the paired differences are approximately normal.</div>',
+            'If the paired differences are approximately normal (Shapiro-Wilk p ≥ 0.05), the app uses a paired t-test; otherwise, it uses the Wilcoxon signed-rank test. The significance level is α = 0.05.</div>',
             unsafe_allow_html=True
         )
         tests = paired_error_tests(evaluation["LSTM AE (kWh)"], evaluation["XGBoost AE (kWh)"])
@@ -1404,19 +1323,21 @@ elif page == "Model Comparison":
             t4.metric(f"{tests['chosen']} p", fmt_p(tests["chosen_p"]))
 
             test_table = pd.DataFrame({
-                "Test": ["Shapiro-Wilk (normality of d)", "Paired t-test", "Wilcoxon signed-rank (supplementary)"],
+                "Test": ["Shapiro-Wilk (normality of d)", "Paired t-test", "Wilcoxon signed-rank"],
                 "Statistic": [tests["sw_W"], tests["t"], tests["w"]],
                 "p-value": [tests["sw_p"], tests["t_p"], tests["w_p"]],
-                "Used for decision": ["Normality check", "Specified by study", "Supplementary only"]
+                "Used for decision": ["Normality check", "If differences are normal", "If differences are not normal"]
             })
             st.dataframe(test_table.round(4), use_container_width=True, hide_index=True)
 
             if np.isfinite(tests["chosen_p"]):
                 if tests["chosen_p"] < 0.05:
-                    lower = "LSTM" if tests["mean_d"] < 0 else "XGBoost"
+                    direction_value = tests["mean_d"] if tests["chosen"] == "Paired t-test" else tests["median_d"]
+                    lower = "LSTM" if direction_value < 0 else "XGBoost"
+                    comparison = "mean absolute error" if tests["chosen"] == "Paired t-test" else "median absolute error"
                     st.success(
                         f"{tests['chosen']}: p = {tests['chosen_p']:.4f} < 0.05. Reject H₀. "
-                        f"The difference in forecasting errors is statistically significant, and {lower} has the smaller mean absolute error."
+                        f"The paired error difference is statistically significant; {lower} has the lower {comparison} in this test period."
                     )
                 else:
                     st.info(
@@ -1441,53 +1362,6 @@ elif page == "Model Comparison":
                 f"Only {tests['n']} monthly pairs are available, so the test may have low power, and monthly errors "
                 "can be correlated. Interpret the p-value together with MAE, RMSE, and MAPE."
             )
-
-        # 2026 OUT-OF-SAMPLE VALIDATION
-        st.markdown(
-            '<div class="section-heading">2026 out-of-sample validation</div>'
-            '<div class="section-copy">These actuals are uploaded separately and are not used to train either model. Only months present in both the forecast and actuals are compared.</div>',
-            unsafe_allow_html=True
-        )
-        if validation_error:
-            st.warning(f"Could not read the 2026 validation file: {validation_error}")
-        elif validation_file is None:
-            st.info("Upload the separate 2026 actuals workbook in the sidebar to calculate out-of-sample metrics.")
-        else:
-            dup_count = validation_actuals.attrs.get("duplicates", 0)
-            if dup_count:
-                st.warning(
-                    f"{dup_count} duplicate month label(s) were found in the 2026 sheet (maybe a second table). "
-                    "The first occurrence was used. Check that it is the right meter."
-                )
-            if len(y) >= 12 and len(validation_actuals) > 0:
-                ratio = float(validation_actuals["Actual (kWh)"].mean()) / max(float(np.mean(y[-12:])), 1e-9)
-                if ratio > 1.5 or ratio < 0.67:
-                    st.warning(
-                        f"The 2026 actuals average is {ratio:.2f}× the average of the last 12 training months. "
-                        "This looks like a different meter/column or unit. Check that the 2026 file uses the same meter/column as the training data."
-                    )
-
-            overlap = forecast.merge(validation_actuals, on="Month", how="inner")
-            if overlap.empty:
-                st.warning(
-                    "No overlapping months. Make sure the forecast starts in January 2026 "
-                    "and its horizon reaches the months with actual data."
-                )
-            else:
-                val_lstm = calculate_metrics(overlap["Actual (kWh)"], overlap["LSTM Forecast (kWh)"])
-                val_xgb = calculate_metrics(overlap["Actual (kWh)"], overlap["XGBoost Forecast (kWh)"])
-                val_metrics = pd.DataFrame({
-                    "Metric": ["MAE (kWh)", "RMSE (kWh)", "MAPE (%)"],
-                    "LSTM": list(val_lstm),
-                    "XGBoost": list(val_xgb)
-                })
-                v1, v2, v3, v4 = st.columns(4)
-                v1.metric("2026 months checked", str(len(overlap)))
-                v2.metric("2026 LSTM MAPE", f"{val_lstm[2]:.2f}%")
-                v3.metric("2026 XGBoost MAPE", f"{val_xgb[2]:.2f}%")
-                v4.metric("Months compared", str(len(overlap)))
-                st.dataframe(overlap.round(2), use_container_width=True, hide_index=True)
-                st.dataframe(val_metrics.round(3), use_container_width=True, hide_index=True)
 
         with st.expander("Understand the evaluation metrics"):
             st.markdown(
@@ -1574,13 +1448,13 @@ else:
                 "Extreme Gradient Boosting learns from lagged consumption "
                 "values and calendar month features."
             )
-            st.caption("Input: lag 1, 2, 3, 12 + monthly seasonality (extended option available)")
+            st.caption("Input: lag 1, 2, 3, 12 + monthly seasonality")
 
         with st.container(border=True):
             st.markdown("### Statistical comparison")
             st.write(
                 "Absolute errors of the two models are paired per month. Shapiro-Wilk checks "
-                "normality of the differences, followed by the paired t-test specified in the study at α = 0.05."
+                "normality of the differences. The app uses a paired t-test when the differences are normal and a Wilcoxon signed-rank test when they are not, at α = 0.05."
             )
 
     with st.container(border=True):
@@ -1596,7 +1470,7 @@ else:
         '<div class="section-heading">Data handling</div>'
         '<div class="section-copy">The app accepts CSV and Excel files, maps '
         'date and consumption columns, sorts records chronologically, excludes '
-        'invalid rows and the pandemic years 2020–2021, and avoids training sequences that cross missing calendar '
+        'invalid rows, pandemic years 2020–2021, and data after 2025, and avoids training sequences that cross missing calendar '
         'months. Data is split chronologically (training → validation → test) with no shuffling. '
         'Duplicate months are averaged during preparation, so review '
         'your source data before interpreting results.</div>',
