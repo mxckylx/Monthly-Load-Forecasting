@@ -1,8 +1,7 @@
 streamlit
+tensorflow
 pandas
 numpy
-plotly
-openpyxl
 scikit-learn
-xgboost
-tensorflow-cpu
+matplotlib
+openpyxl
